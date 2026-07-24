@@ -52,6 +52,9 @@ import {
 import {
   CanvasVideoRecorder,
   getSupportedVideoMimeType,
+  isVideoExportFormatSupported,
+  videoFormatFromMimeType,
+  type VideoExportFormat,
 } from '../video/CanvasVideoRecorder';
 
 type DriveState = 'idle' | 'starting' | 'calibrating' | 'driving' | 'denied';
@@ -116,6 +119,15 @@ function formatDuration(seconds: number): string {
   const whole = Math.max(0, Math.round(seconds));
   const minutes = Math.floor(whole / 60);
   return `${minutes}:${String(whole % 60).padStart(2, '0')}`;
+}
+
+function buildDanceOutputName(sourceName: string, format: VideoExportFormat): string {
+  const baseName = sourceName.replace(/\.[^.]+$/, '') || 'dance';
+  return `${baseName}-digital-human.${format}`;
+}
+
+function defaultVideoExportFormat(): VideoExportFormat {
+  return isVideoExportFormatSupported('mp4') ? 'mp4' : 'webm';
 }
 
 /** 兼容片头/空镜：先覆盖整段粗扫，再围绕最清晰的全身帧做精细标定。 */
@@ -283,7 +295,13 @@ export function MotionPage({ workspace = 'studio' }: { workspace?: 'studio' | 'v
     useState<DanceRecognitionMetrics | null>(null);
   const [danceError, setDanceError] = useState('');
   const [danceOutputUrl, setDanceOutputUrl] = useState<string | null>(null);
-  const [danceOutputName, setDanceOutputName] = useState('digital-human-dance.webm');
+  const [danceExportFormat, setDanceExportFormat] =
+    useState<VideoExportFormat>(defaultVideoExportFormat);
+  const [danceOutputName, setDanceOutputName] = useState(() =>
+    buildDanceOutputName('digital-human-dance', defaultVideoExportFormat()),
+  );
+  const mp4ExportSupported = isVideoExportFormatSupported('mp4');
+  const webmExportSupported = isVideoExportFormatSupported('webm');
 
   const setDanceState = (state: DanceState) => {
     danceStateRef.current = state;
@@ -962,6 +980,16 @@ export function MotionPage({ workspace = 'studio' }: { workspace?: 'studio' | 'v
     setDanceOutputUrl(null);
   };
 
+  const selectDanceExportFormat = (format: VideoExportFormat) => {
+    if (format === danceExportFormat) return;
+    clearDanceOutput();
+    setDanceExportFormat(format);
+    setDanceOutputName(
+      buildDanceOutputName(danceInfo?.name ?? 'digital-human-dance', format),
+    );
+    setDanceError('');
+  };
+
   const cancelDanceRun = () => {
     danceRunTokenRef.current += 1;
     danceFinishingRef.current = false;
@@ -1022,12 +1050,18 @@ export function MotionPage({ workspace = 'studio' }: { workspace?: 'studio' | 'v
         const blob = await recorder.stop();
         if (blob.size === 0) throw new Error('导出文件为空，请重新录制');
         clearDanceOutput();
+        const actualFormat = videoFormatFromMimeType(blob.type, danceExportFormat);
+        const outputName = buildDanceOutputName(
+          danceInfo?.name ?? 'digital-human-dance',
+          actualFormat,
+        );
         const outputUrl = URL.createObjectURL(blob);
         danceOutputUrlRef.current = outputUrl;
         setDanceOutputUrl(outputUrl);
+        setDanceOutputName(outputName);
         const anchor = document.createElement('a');
         anchor.href = outputUrl;
-        anchor.download = danceOutputName;
+        anchor.download = outputName;
         anchor.click();
       }
       setDanceState('completed');
@@ -1118,8 +1152,12 @@ export function MotionPage({ workspace = 'studio' }: { workspace?: 'studio' | 'v
       setDanceError('请先停止摄像头驱动，再复现真人视频');
       return;
     }
-    if (mode === 'record' && !getSupportedVideoMimeType()) {
-      setDanceError('当前浏览器不支持 WebM 录制，请使用最新版 Chrome 或 Edge');
+    if (mode === 'record' && !getSupportedVideoMimeType(danceExportFormat)) {
+      setDanceError(
+        danceExportFormat === 'mp4'
+          ? '当前浏览器不支持 MP4 录制，请选择 WebM 兼容格式'
+          : '当前浏览器不支持 WebM 录制，请选择 MP4 格式',
+      );
       setDanceState('error');
       return;
     }
@@ -1222,7 +1260,9 @@ export function MotionPage({ workspace = 'studio' }: { workspace?: 'studio' | 'v
         recorder.start(controller.getRenderCanvas(), {
           fps: 30,
           videoBitsPerSecond: 8_000_000,
+          audioBitsPerSecond: 192_000,
           sourceVideo: video,
+          format: danceExportFormat,
         });
         danceRecorderRef.current = recorder;
         setDanceState('recording');
@@ -1311,8 +1351,7 @@ export function MotionPage({ workspace = 'studio' }: { workspace?: 'studio' | 'v
         sizeBytes: file.size,
       };
       setDanceInfo(info);
-      const baseName = file.name.replace(/\.[^.]+$/, '') || 'dance';
-      setDanceOutputName(`${baseName}-digital-human.webm`);
+      setDanceOutputName(buildDanceOutputName(file.name, danceExportFormat));
       setDanceState('ready');
     } catch (error) {
       setDanceError(error instanceof Error ? error.message : '视频读取失败');
@@ -1925,6 +1964,36 @@ export function MotionPage({ workspace = 'studio' }: { workspace?: 'studio' | 'v
             )}
             {danceError && <p className="form-error">{danceError}</p>}
 
+            <p className="control-label">导出格式</p>
+            <div
+              className="mode-select dance-format-select"
+              role="group"
+              aria-label="数字人视频导出格式"
+            >
+              <button
+                className={`btn btn-sm ${danceExportFormat === 'mp4' ? 'btn-primary' : ''}`}
+                disabled={danceBusy || !mp4ExportSupported}
+                aria-pressed={danceExportFormat === 'mp4'}
+                onClick={() => selectDanceExportFormat('mp4')}
+              >
+                MP4（推荐）
+              </button>
+              <button
+                className={`btn btn-sm ${danceExportFormat === 'webm' ? 'btn-primary' : ''}`}
+                disabled={danceBusy || !webmExportSupported}
+                aria-pressed={danceExportFormat === 'webm'}
+                onClick={() => selectDanceExportFormat('webm')}
+              >
+                WebM（兼容）
+              </button>
+            </div>
+            <p className="muted dance-format-help">
+              {mp4ExportSupported
+                ? 'MP4 使用 H.264 编码，适合直接发送、剪辑和在常见播放器中播放。'
+                : '当前浏览器不能原生录制 MP4，请使用 WebM，或升级 Chrome、Edge、Safari。'}
+              {' '}浏览器允许捕获源音轨时会保留原声。
+            </p>
+
             <div className="mode-select studio-actions dance-actions">
               <button
                 className="btn btn-sm"
@@ -1945,7 +2014,7 @@ export function MotionPage({ workspace = 'studio' }: { workspace?: 'studio' | 'v
                 disabled={!danceInfo || danceBusy || cameraActive}
                 onClick={() => void startDanceRun('record')}
               >
-                导出数字人视频
+                导出 {danceExportFormat.toUpperCase()}
               </button>
               {danceBusy && (
                 <button className="btn btn-sm btn-danger" onClick={cancelDanceRun}>
@@ -1954,13 +2023,13 @@ export function MotionPage({ workspace = 'studio' }: { workspace?: 'studio' | 'v
               )}
               {danceOutputUrl && (
                 <a className="btn btn-sm" href={danceOutputUrl} download={danceOutputName}>
-                  再次下载 WebM
+                  再次下载 {danceOutputName.toLowerCase().endsWith('.mp4') ? 'MP4' : 'WebM'}
                 </a>
               )}
             </div>
             <p className="muted">
               导出内容是左侧当前画面；可在开始前用鼠标旋转、平移或缩放调整构图。
-              浏览器支持时保留原视频声音，否则输出无声 WebM。
+              导出容器与文件扩展名严格一致，不会用修改后缀伪装格式。
             </p>
             <p className="muted">
               建议使用固定机位、均匀光照、头手脚完整入镜且遮挡较少的正面或 45° 舞蹈视频。

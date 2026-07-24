@@ -30,7 +30,7 @@ const WORKSPACES = [
     icon: '影',
     title: '真人视频复现',
     subtitle: '导入舞蹈并导出数字人视频',
-    description: '在独立工作区导入真人全身视频，本地识别动作并导出数字人 WebM。',
+    description: '在独立工作区导入真人全身视频，本地识别动作并导出数字人 MP4 或 WebM。',
     steps: ['选择人物', '导入真人视频', '预览并导出'],
     to: '/avatars?workspace=video',
     action: '进入视频复现',

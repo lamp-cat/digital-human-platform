@@ -3,23 +3,89 @@ type CaptureCapableVideo = HTMLVideoElement & {
   mozCaptureStream?: () => MediaStream;
 };
 
+export type VideoExportFormat = 'mp4' | 'webm';
+
 export interface CanvasVideoRecorderOptions {
   fps?: number;
   videoBitsPerSecond?: number;
+  audioBitsPerSecond?: number;
   sourceVideo?: HTMLVideoElement;
+  /** 目标容器格式；默认 MP4，不会通过伪改扩展名降级。 */
+  format?: VideoExportFormat;
 }
 
-/** 选择当前浏览器实际支持的 WebM 编码。 */
-export function getSupportedVideoMimeType(): string | null {
-  if (typeof MediaRecorder === 'undefined') return null;
-  const candidates = [
-    'video/webm;codecs=vp9,opus',
-    'video/webm;codecs=vp8,opus',
-    'video/webm;codecs=vp9',
-    'video/webm;codecs=vp8',
-    'video/webm',
-  ];
-  return candidates.find((mime) => MediaRecorder.isTypeSupported(mime)) ?? null;
+type MimeTypeSupport = (mimeType: string) => boolean;
+
+function browserSupportsMimeType(mimeType: string): boolean {
+  return (
+    typeof MediaRecorder !== 'undefined' &&
+    typeof MediaRecorder.isTypeSupported === 'function' &&
+    MediaRecorder.isTypeSupported(mimeType)
+  );
+}
+
+/**
+ * MP4 使用兼容性较好的 H.264 Baseline + AAC-LC；没有音轨时不声明 AAC。
+ * 末尾的容器级 MIME 让浏览器在支持 MP4、但只接受自动选码时仍可工作。
+ */
+export function getVideoMimeTypeCandidates(
+  format: VideoExportFormat,
+  hasAudio = false,
+): string[] {
+  if (format === 'mp4') {
+    return hasAudio
+      ? [
+          'video/mp4;codecs=avc1.42E01E,mp4a.40.2',
+          'video/mp4;codecs=avc1,mp4a.40.2',
+          'video/mp4',
+        ]
+      : [
+          'video/mp4;codecs=avc1.42E01E',
+          'video/mp4;codecs=avc1',
+          'video/mp4',
+        ];
+  }
+  return hasAudio
+    ? [
+        'video/webm;codecs=vp9,opus',
+        'video/webm;codecs=vp8,opus',
+        'video/webm',
+      ]
+    : [
+        'video/webm;codecs=vp9',
+        'video/webm;codecs=vp8',
+        'video/webm',
+      ];
+}
+
+/** 返回指定格式当前可用的首选编码；不会静默切换到另一种容器。 */
+export function getSupportedVideoMimeType(
+  format: VideoExportFormat = 'mp4',
+  hasAudio = false,
+  isTypeSupported: MimeTypeSupport = browserSupportsMimeType,
+): string | null {
+  return (
+    getVideoMimeTypeCandidates(format, hasAudio).find((mime) =>
+      isTypeSupported(mime),
+    ) ?? null
+  );
+}
+
+export function isVideoExportFormatSupported(format: VideoExportFormat): boolean {
+  return (
+    getSupportedVideoMimeType(format, false) !== null ||
+    getSupportedVideoMimeType(format, true) !== null
+  );
+}
+
+export function videoFormatFromMimeType(
+  mimeType: string,
+  fallback: VideoExportFormat = 'webm',
+): VideoExportFormat {
+  const normalized = mimeType.toLowerCase();
+  if (normalized.startsWith('video/mp4')) return 'mp4';
+  if (normalized.startsWith('video/webm')) return 'webm';
+  return fallback;
 }
 
 /**
@@ -38,13 +104,13 @@ export class CanvasVideoRecorder {
   start(canvas: HTMLCanvasElement, options: CanvasVideoRecorderOptions = {}): void {
     if (this.recorder) throw new Error('录制器已在运行');
     if (typeof canvas.captureStream !== 'function') {
-      throw new Error('当前浏览器不支持画布视频录制，请使用最新版 Chrome 或 Edge');
+      throw new Error('当前浏览器不支持画布视频录制，请使用最新版 Chrome、Edge 或 Safari');
     }
-    const mimeType = getSupportedVideoMimeType();
-    if (!mimeType) {
-      throw new Error('当前浏览器不支持 WebM 录制，请使用最新版 Chrome 或 Edge');
+    if (typeof MediaRecorder === 'undefined') {
+      throw new Error('当前浏览器不支持视频录制，请使用最新版 Chrome、Edge 或 Safari');
     }
 
+    const format = options.format ?? 'mp4';
     const stream = canvas.captureStream(options.fps ?? 30);
     const source = options.sourceVideo as CaptureCapableVideo | undefined;
     const captureSource = source?.captureStream ?? source?.mozCaptureStream;
@@ -57,21 +123,55 @@ export class CanvasVideoRecorder {
       }
     }
 
-    this.mimeType = mimeType;
+    const candidates = getVideoMimeTypeCandidates(
+      format,
+      stream.getAudioTracks().length > 0,
+    ).filter(browserSupportsMimeType);
+    if (candidates.length === 0) {
+      for (const track of stream.getTracks()) track.stop();
+      throw new Error(
+        format === 'mp4'
+          ? '当前浏览器不支持 MP4 录制，请选择 WebM 或升级 Chrome、Edge、Safari'
+          : '当前浏览器不支持 WebM 录制，请选择 MP4 或升级浏览器',
+      );
+    }
+
+    let recorder: MediaRecorder | null = null;
+    let selectedMimeType = '';
+    for (const mimeType of candidates) {
+      try {
+        recorder = new MediaRecorder(stream, {
+          mimeType,
+          videoBitsPerSecond: options.videoBitsPerSecond ?? 8_000_000,
+          audioBitsPerSecond: options.audioBitsPerSecond ?? 192_000,
+        });
+        selectedMimeType = mimeType;
+        break;
+      } catch {
+        // isTypeSupported 是能力提示而非运行保证；继续尝试同容器的下一个编码组合。
+      }
+    }
+    if (!recorder) {
+      for (const track of stream.getTracks()) track.stop();
+      throw new Error(
+        format === 'mp4'
+          ? 'MP4 编码器启动失败，请选择 WebM 兼容格式'
+          : 'WebM 编码器启动失败，请选择 MP4 格式',
+      );
+    }
+
+    this.recorder = recorder;
+    this.mimeType = recorder.mimeType || selectedMimeType;
     this.outputStream = stream;
     this.chunks = [];
     this.stopPromise = new Promise<Blob>((resolve, reject) => {
       this.resolveStop = resolve;
       this.rejectStop = reject;
     });
-    this.recorder = new MediaRecorder(stream, {
-      mimeType,
-      videoBitsPerSecond: options.videoBitsPerSecond ?? 8_000_000,
-    });
-    this.recorder.ondataavailable = (event) => {
+    recorder.ondataavailable = (event) => {
       if (event.data.size > 0) this.chunks.push(event.data);
     };
-    this.recorder.onerror = (event) => {
+    recorder.onerror = (event) => {
       const error =
         'error' in event && event.error instanceof Error
           ? event.error
@@ -79,12 +179,12 @@ export class CanvasVideoRecorder {
       this.rejectStop?.(error);
       this.cleanup();
     };
-    this.recorder.onstop = () => {
+    recorder.onstop = () => {
       const blob = new Blob(this.chunks, { type: this.mimeType });
       this.resolveStop?.(blob);
       this.cleanup();
     };
-    this.recorder.start(1000);
+    recorder.start(1000);
   }
 
   isRecording(): boolean {
