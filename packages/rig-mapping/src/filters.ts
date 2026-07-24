@@ -170,6 +170,10 @@ export interface HandFrameStabilizerOptions {
   forgetAfterFrames?: number;
   /** 左右标签与时序位置冲突时的标签惩罚，默认 0.22。 */
   labelMismatchPenalty?: number;
+  /** 姿态腕点参与左右手身份分配的权重，默认 1.5。 */
+  poseWristWeight?: number;
+  /** 手帧与姿态帧最大时间差（ms），默认 150。 */
+  poseFrameMaxAgeMs?: number;
 }
 
 type HandSide = 'left' | 'right';
@@ -177,6 +181,11 @@ type HandSide = 'left' | 'right';
 function wristOf(hand: HandData): { x: number; y: number } | null {
   const wrist = hand.landmarks.find((lm) => lm.name === 'wrist');
   return wrist ? { x: wrist.x, y: wrist.y } : null;
+}
+
+function poseWristOf(frame: PoseFrame | null | undefined, side: HandSide): { x: number; y: number } | null {
+  const wrist = frame?.landmarks.find((lm) => lm.name === `${side}_wrist`);
+  return wrist && wrist.visibility >= 0.45 ? { x: wrist.x, y: wrist.y } : null;
 }
 
 function pointDistance(
@@ -191,8 +200,8 @@ function pointDistance(
  * 双手时序身份稳定器。
  *
  * Hand Landmarker 的单帧 handedness 在交叉、遮挡或手背朝向镜头时可能跳变；
- * 本类用手腕轨迹做二分配，并对进入/退出置信度使用迟滞。输出 handedness
- * 仍是解剖学语义，可直接交给 HandFrameSmoother 和 hand-mapper。
+ * 本类融合手腕轨迹与 Pose 左右腕点做二分配，并对进入/退出置信度使用迟滞。
+ * 输出 handedness 仍是解剖学语义，可直接交给 HandFrameSmoother 和 hand-mapper。
  */
 export class HandFrameStabilizer {
   private previous: Record<HandSide, { wrist: { x: number; y: number } | null; missing: number } | null> = {
@@ -202,11 +211,25 @@ export class HandFrameStabilizer {
 
   constructor(private opts: HandFrameStabilizerOptions = {}) {}
 
-  apply(frame: HandFrame): HandFrame {
+  apply(frame: HandFrame, poseFrame?: PoseFrame | null): HandFrame {
     const enter = this.opts.enterConfidence ?? 0.6;
     const exit = this.opts.exitConfidence ?? 0.45;
     const forgetAfter = this.opts.forgetAfterFrames ?? 5;
     const mismatch = this.opts.labelMismatchPenalty ?? 0.22;
+    const poseWristWeight = this.opts.poseWristWeight ?? 1.5;
+    const poseFrameMaxAgeMs = this.opts.poseFrameMaxAgeMs ?? 150;
+    const freshPose =
+      poseFrame && Math.abs(frame.timestampMs - poseFrame.timestampMs) <= poseFrameMaxAgeMs
+        ? poseFrame
+        : null;
+    const identityCost = (hand: HandData, side: HandSide) => {
+      const poseWrist = poseWristOf(freshPose, side);
+      return (
+        pointDistance(wristOf(hand), this.previous[side]?.wrist ?? null) +
+        (hand.handedness === side ? 0 : mismatch * (0.5 + hand.score)) +
+        (poseWrist ? pointDistance(wristOf(hand), poseWrist) * poseWristWeight : 0)
+      );
+    };
     const candidates = frame.hands
       .filter((hand) => hand.landmarks.length > 0)
       .sort((a, b) => b.score - a.score)
@@ -222,9 +245,7 @@ export class HandFrameStabilizer {
         if (hand.score < threshold) continue;
         assignments.push({
           hands: [{ ...hand, handedness: side }],
-          cost:
-            pointDistance(wristOf(hand), state?.wrist ?? null) +
-            (hand.handedness === side ? 0 : mismatch * (0.5 + hand.score)),
+          cost: identityCost(hand, side),
         });
       }
     } else if (candidates.length === 2) {
@@ -241,9 +262,7 @@ export class HandFrameStabilizer {
             valid = false;
             break;
           }
-          cost +=
-            pointDistance(wristOf(hand), state?.wrist ?? null) +
-            (hand.handedness === side ? 0 : mismatch * (0.5 + hand.score));
+          cost += identityCost(hand, side);
           hands.push({ ...hand, handedness: side });
         }
         if (valid) assignments.push({ hands, cost });

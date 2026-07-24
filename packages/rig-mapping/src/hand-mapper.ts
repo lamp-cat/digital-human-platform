@@ -1,5 +1,11 @@
 import { Matrix4, Quaternion, Vector3 } from 'three';
-import type { ExtendedRigBone, HandData, HandFrame } from '@dhp/avatar-schema';
+import { Hand as KalidokitHand } from 'kalidokit';
+import {
+  HAND_LANDMARK_NAMES,
+  type ExtendedRigBone,
+  type HandData,
+  type HandFrame,
+} from '@dhp/avatar-schema';
 import { landmarkToWorld } from './coords.js';
 import { clampQuaternionAngle } from './mapper.js';
 
@@ -8,7 +14,8 @@ import { clampQuaternionAngle } from './mapper.js';
  * - 手掌朝向：wrist→middle_mcp 为掌心方向、index_mcp→pinky_mcp 为掌横轴，
  *   构建手掌坐标系，输出 Hand 骨骼的世界系旋转增量（相对绑定姿态，限幅防翻转）；
  * - 手指屈伸：每指三段关节方向相对「手掌当前朝向下的绑定参考方向」的有符号夹角，
- *   绕掌横轴（拇指绕掌纵轴）旋转写入 Proximal/Intermediate/Distal；
+ *   并融合 KalidoKit 的链式局部关节角先验，绕掌横轴（拇指绕掌纵轴）旋转写入
+ *   Proximal/Intermediate/Distal；
  * - 只输出 rigBones 集合里存在的骨骼（内置底模无手指骨骼 → 自动跳过）。
  *
  * 镜像语义：始终 mirror=false（解剖学对应，用户右手 → 数字人右手）。
@@ -32,6 +39,8 @@ export interface MapHandOptions {
   maxThumbCurlDeg?: number;
   /** 允许的过伸角（度，负方向），默认 15 */
   hyperextendDeg?: number;
+  /** KalidoKit 链式关节角先验的融合权重 0–1，默认 0.4；设为 0 可关闭。 */
+  kinematicPriorWeight?: number;
   /** 合理掌宽范围（worldLandmarks 米制；回退图像坐标时同样可过滤塌缩坏帧）。 */
   minPalmSpan?: number;
   maxPalmSpan?: number;
@@ -73,6 +82,7 @@ const JOINT_NAMES = ['Proximal', 'Intermediate', 'Distal'] as const;
 /** 放松微屈（手丢失时的回退姿态）：四指 15°、拇指 10°。 */
 const RELAX_CURL_DEG = 15;
 const RELAX_THUMB_CURL_DEG = 10;
+const JOINT_FLEX_LIMIT_DEG = [95, 110, 85] as const;
 
 /** 由掌心方向 f 与掌横轴 u 构建手掌坐标系（返回四元数与各轴）。 */
 function palmFrame(f: Vector3, u: Vector3, sign: 1 | -1) {
@@ -106,6 +116,37 @@ function makePointGetter(hand: HandData, visibilityThreshold: number): HandPoint
   };
 }
 
+/**
+ * KalidoKit 的成熟手部解算器以相邻三点计算各指节局部屈曲角。
+ * 这里仅取四指局部 z 角作为几何先验，再由平台自己的世界系解算器输出四元数；
+ * 不直接套用其 VRM Euler，避免不同模型局部轴约定造成错轴。
+ */
+function buildKinematicFlexPrior(
+  point: HandPoints['get'],
+  side: Side,
+): Map<ExtendedRigBone, number> {
+  const landmarks: { x: number; y: number; z: number }[] = [];
+  for (const name of HAND_LANDMARK_NAMES) {
+    const p = point(name);
+    if (!p) return new Map();
+    landmarks.push({ x: p.x, y: p.y, z: p.z });
+  }
+  const solved = KalidokitHand.solve(landmarks, side === 'left' ? 'Left' : 'Right');
+  if (!solved) return new Map();
+  const values = solved as unknown as Record<string, { x: number; y: number; z: number }>;
+  const prefix = side === 'left' ? 'Left' : 'Right';
+  const prior = new Map<ExtendedRigBone, number>();
+  for (const def of FINGER_DEFS) {
+    if (def.finger === 'Thumb') continue;
+    for (const joint of JOINT_NAMES) {
+      const bone = `${prefix}${def.finger}${joint}` as ExtendedRigBone;
+      const radians = values[bone]?.z;
+      if (Number.isFinite(radians)) prior.set(bone, Math.abs(radians) / DEG);
+    }
+  }
+  return prior;
+}
+
 /** 单手映射（纯函数）：返回该侧 Hand 与手指骨骼的世界系旋转增量。 */
 function mapOneHand(
   hand: HandData,
@@ -118,6 +159,7 @@ function mapOneHand(
     maxCurlDeg,
     maxThumbCurlDeg,
     hyperextendDeg,
+    kinematicPriorWeight,
     minPalmSpan,
     maxPalmSpan,
   } = opts;
@@ -149,6 +191,8 @@ function mapOneHand(
   rotations[`${sidePrefix}Hand` as ExtendedRigBone] = {
     x: handDelta.x, y: handDelta.y, z: handDelta.z, w: handDelta.w,
   };
+  const kinematicPrior = buildKinematicFlexPrior(point, side);
+  const priorWeight = Math.min(1, Math.max(0, kinematicPriorWeight));
 
   // ---- 手指屈伸 ----
   for (const def of FINGER_DEFS) {
@@ -161,6 +205,7 @@ function mapOneHand(
 
     const pts = def.chain.map((name) => point(name));
     const fingerCurls: number[] = [];
+    let priorCumulativeDeg = 0;
     for (let j = 0; j < 3; j++) {
       const boneName = `${sidePrefix}${def.finger}${JOINT_NAMES[j]}` as ExtendedRigBone;
       const a = pts[j];
@@ -181,7 +226,17 @@ function mapOneHand(
       const bend = signedAngleDeg(refCur, seg, axisCur);
       const maxCurlDegVal = isThumb ? maxThumbCurlDeg : maxCurlDeg;
       const flexSign = isThumb ? bind.sign : -1;
-      const flex = bend * flexSign;
+      const measuredFlex = bend * flexSign;
+      const priorLocalDeg = kinematicPrior.get(boneName);
+      if (!isThumb && priorLocalDeg !== undefined) {
+        priorCumulativeDeg += Math.min(priorLocalDeg, JOINT_FLEX_LIMIT_DEG[j]);
+      }
+      // 世界段方向负责保留指向/外展，KalidoKit 累积局部角负责约束关节链。
+      // 过伸时不注入正向先验，避免张手被误判为轻微握拳。
+      const flex =
+        !isThumb && measuredFlex > 0 && priorCumulativeDeg > 0
+          ? measuredFlex * (1 - priorWeight) + priorCumulativeDeg * priorWeight
+          : measuredFlex;
       const clampedFlex = Math.min(Math.max(flex, -hyperextendDeg), maxCurlDegVal);
       const appliedBend = clampedFlex * flexSign;
       const q = new Quaternion().setFromAxisAngle(axisCur, appliedBend * DEG).multiply(handDelta);
@@ -259,6 +314,7 @@ export function mapHandFrameToBoneRotations(
     maxCurlDeg: opts.maxCurlDeg ?? 120,
     maxThumbCurlDeg: opts.maxThumbCurlDeg ?? 100,
     hyperextendDeg: opts.hyperextendDeg ?? 15,
+    kinematicPriorWeight: opts.kinematicPriorWeight ?? 0.4,
     minPalmSpan: opts.minPalmSpan ?? 0.018,
     maxPalmSpan: opts.maxPalmSpan ?? 0.25,
   };

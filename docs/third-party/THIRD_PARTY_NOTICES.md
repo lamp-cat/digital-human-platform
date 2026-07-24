@@ -5,6 +5,7 @@
 | Three.js | ^0.169.0 | Web 三维渲染 | MIT | https://github.com/mrdoob/three.js |
 | @pixiv/three-vrm | ^3 | VRM 人形模型加载与控制 | MIT | https://github.com/pixiv/three-vrm |
 | @mediapipe/tasks-vision | ^0.10 | 浏览器端人体姿态关键点（Pose Landmarker） | Apache-2.0 | https://github.com/google-ai-edge/mediapipe |
+| KalidoKit | 1.1.5 | MediaPipe 手部关键点的 VRM 指节运动学先验解算 | MIT | https://github.com/yeemachine/kalidokit |
 | Pose Landmarker 模型 | float16 latest | 端侧姿态估计模型（本地打包，不上传视频/关键点） | 遵循 MediaPipe 模型条款 | https://storage.googleapis.com/mediapipe-models/ |
 | Hand Landmarker 模型 | float16 latest | 端侧手部关键点估计模型（21 点 × 双手，本地打包；动作模式"手部追踪"实验性功能） | Apache-2.0 | https://storage.googleapis.com/mediapipe-models/ |
 | Face Landmarker 模型 | float16 latest | 端侧单人面部关键点与 52 项 blendshape 估计（本地打包，不上传视频/关键点） | Apache-2.0 | https://storage.googleapis.com/mediapipe-models/ |

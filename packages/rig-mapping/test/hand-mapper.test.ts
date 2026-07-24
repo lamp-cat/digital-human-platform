@@ -80,6 +80,24 @@ function fistLeft(): Record<string, V3> {
   return pts;
 }
 
+/** 带明显景深分量的食指弯曲：模拟斜对摄像头时单目深度导致的屈曲低估。 */
+function obliqueIndexLeft(): Record<string, V3> {
+  const pts: Record<string, V3> = { ...OPEN_LEFT };
+  const mcp = new Vector3(...OPEN_LEFT.index_finger_mcp);
+  const direction = (curlDeg: number) =>
+    new Vector3(1, 0, 0)
+      .applyAxisAngle(new Vector3(0, 0, 1), (-curlDeg * Math.PI) / 180)
+      .applyAxisAngle(new Vector3(0, 1, 0), (40 * Math.PI) / 180)
+      .normalize();
+  const pip = mcp.clone().addScaledVector(direction(25), 0.03);
+  const dip = pip.clone().addScaledVector(direction(55), 0.025);
+  const tip = dip.clone().addScaledVector(direction(85), 0.02);
+  pts.index_finger_pip = [pip.x, pip.y, pip.z];
+  pts.index_finger_dip = [dip.x, dip.y, dip.z];
+  pts.index_finger_tip = [tip.x, tip.y, tip.z];
+  return pts;
+}
+
 function mirrorX(pts: Record<string, V3>): Record<string, V3> {
   return Object.fromEntries(Object.entries(pts).map(([k, [x, y, z]]) => [k, [-x, y, z]]));
 }
@@ -162,6 +180,19 @@ describe('hand-mapper：手指屈伸', () => {
     const idxAngle = 2 * Math.acos(Math.min(1, Math.abs(idx.w)));
     expect(handAngle).toBeLessThan((30 * Math.PI) / 180);
     expect(idxAngle).toBeGreaterThan((60 * Math.PI) / 180);
+  });
+
+  it('KalidoKit 链式角先验补偿斜对镜头时的指节屈曲低估', () => {
+    const hand: HandData = {
+      handedness: 'left',
+      score: 0.95,
+      landmarks: toLandmarks(obliqueIndexLeft()),
+    };
+    const frame = makeFrame([hand]);
+    const native = computeHandCurls(frame, { kinematicPriorWeight: 0 });
+    const hybrid = computeHandCurls(frame, { kinematicPriorWeight: 1 });
+    expect(hybrid.left.index).toBeGreaterThan(native.left.index + 0.05);
+    expect(hybrid.left.index).toBeLessThanOrEqual(1);
   });
 });
 

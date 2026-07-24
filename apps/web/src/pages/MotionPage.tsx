@@ -62,6 +62,7 @@ export function MotionPage() {
   const trackerRef = useRef<CameraPoseTracker | null>(null);
   // One Euro：广播体操级大动作实验调参（1.5Hz 挥臂衰减 34%→10%，静态噪声残留 33%→36%）
   const smootherRef = useRef(new LandmarkSmoother({ minCutoff: 1.5, beta: 0.3 }));
+  const latestPoseFrameRef = useRef<PoseFrame | null>(null);
   const lossMgrRef = useRef(new TrackingLossManager());
   const sessionRef = useRef<CalibrationSession | null>(null);
   const calibrationRef = useRef<CalibrationData | null>(null);
@@ -111,6 +112,7 @@ export function MotionPage() {
   // ---------- 帧处理（追踪器回调，注意用 ref 读最新状态） ----------
   const handleFrame = useCallback((frame: PoseFrame) => {
     const smoothed = smootherRef.current.apply(frame);
+    latestPoseFrameRef.current = smoothed;
     const state = driveStateRef.current;
 
     if (state === 'calibrating' && sessionRef.current) {
@@ -145,7 +147,7 @@ export function MotionPage() {
   // ---------- 手部帧处理（HandTracker 回调） ----------
   const handleHandFrame = useCallback((frame: HandFrame) => {
     if (!handEnabledRef.current) return;
-    const stabilized = handStabilizerRef.current.apply(frame);
+    const stabilized = handStabilizerRef.current.apply(frame, latestPoseFrameRef.current);
     const smoothed = handSmootherRef.current.apply(stabilized);
     const rotations = handDriveRef.current.update(smoothed, smoothed.timestampMs);
     controllerRef.current?.pkg?.applyBoneRotations(rotations);
@@ -188,6 +190,7 @@ export function MotionPage() {
     handDriveRef.current.reset();
     handStabilizerRef.current.reset();
     handSmootherRef.current.reset();
+    latestPoseFrameRef.current = null;
     resetHandBones(); // 关闭时手指/手掌回绑定姿态
   }, [resetHandBones]);
 
@@ -199,6 +202,7 @@ export function MotionPage() {
       handDriveRef.current = new HandDriveManager({
         rigBones: rigBonesRef.current,
         scoreThreshold: 0.55,
+        kinematicPriorWeight: 0.4,
         temporalSmoothingMs: 45,
         maxAngularVelocityDegPerSec: 900,
       });
@@ -222,6 +226,7 @@ export function MotionPage() {
       handStabilizerRef.current.reset();
       handSmootherRef.current.reset();
       handDriveRef.current.reset();
+      latestPoseFrameRef.current = null;
     } catch (err) {
       setErrorMsg(err instanceof Error ? `手部模型加载失败：${err.message}` : '手部模型加载失败');
     }
@@ -329,6 +334,7 @@ export function MotionPage() {
           handDriveRef.current = new HandDriveManager({
             rigBones: rigBonesRef.current,
             scoreThreshold: 0.55,
+            kinematicPriorWeight: 0.4,
             temporalSmoothingMs: 45,
             maxAngularVelocityDegPerSec: 900,
           });
@@ -698,8 +704,9 @@ export function MotionPage() {
               高精度手部追踪 <Badge kind="info">实验性</Badge>
             </h3>
             <p className="muted">
-              24 FPS 双手 21 点追踪，含左右手时序身份稳定、关键点与旋转双层平滑及异常翻转抑制。
-              五指驱动需要 VRM 模型带手指骨骼；内置底模仅手掌朝向生效。
+              24 FPS 双手 21 点追踪，融合 Pose 腕点身份校验、KalidoKit 指节运动学先验、
+              关键点与旋转双层平滑及异常翻转抑制。五指驱动需要 VRM 模型带手指骨骼；
+              内置底模仅手掌朝向生效。
             </p>
             {fingerSupport !== null && (
               <p>

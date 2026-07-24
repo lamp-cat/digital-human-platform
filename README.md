@@ -32,7 +32,7 @@ flowchart LR
 | 层级 | 技术 |
 | --- | --- |
 | Web 前端 | React 18、TypeScript、Vite、Three.js、`@pixiv/three-vrm`、Zustand |
-| 视觉与骨骼 | MediaPipe Pose / Hand / Face Landmarker、One Euro Filter、StandardRig、VRM Expression |
+| 视觉与骨骼 | MediaPipe Pose / Hand / Face Landmarker、KalidoKit 手部运动学先验、One Euro Filter、StandardRig、VRM Expression |
 | API 服务 | FastAPI、SQLAlchemy、Pydantic、JWT |
 | 生产基础设施 | Nginx、PostgreSQL、Redis、MinIO、Docker Compose |
 
@@ -124,7 +124,7 @@ JWT_SECRET='<替换为随机高强度密钥>' docker compose up --build
 - **统一人物规范**：以 `AvatarProfile`、`StandardRig` 和 Manifest 作为跨前后端契约，隔离模型来源差异。
 - **事务式换装**：校验、预构建和提交作为一个完整事务；失败时保留原穿搭和人物状态。
 - **导入能力分级**：不把“文件可解析”等同于“平台完全兼容”，用结构化报告明确可编辑与可驱动边界。
-- **精细手脸动捕**：面部使用 478 点、52 个 blendshape 和中性脸去偏置；手部使用 24 FPS 双手 21 点、身份迟滞与关键点/四元数双层平滑。
+- **精细手脸动捕**：面部使用 478 点、52 个 blendshape 和中性脸去偏置；手部使用 24 FPS 双手 21 点、Pose 腕点身份校验、KalidoKit 指节运动学先验与关键点/四元数双层平滑。
 - **隐私优先的动作识别**：视频帧和关键点留在用户设备，服务端只处理人物和资产业务。
 - **可恢复降级**：摄像头不可用、跟踪丢失或导入服务异常时，平台均提供清晰回退路径。
 
@@ -139,6 +139,7 @@ JWT_SECRET='<替换为随机高强度密钥>' docker compose up --build
 
 - [Web 前端与页面说明](apps/web/README.md)
 - [API 契约](docs/api/api-contract.md)
+- [手部追踪开源方案评估](docs/hand-tracking-open-source-evaluation.md)
 - [第三方组件与许可证](docs/third-party/THIRD_PARTY_NOTICES.md)
 
 本仓库尚未声明项目源代码许可证；第三方组件与示例资产分别遵循其原始许可条款。

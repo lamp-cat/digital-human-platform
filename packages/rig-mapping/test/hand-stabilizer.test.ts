@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import type { HandData, HandFrame } from '@dhp/avatar-schema';
+import type { HandData, HandFrame, PoseFrame } from '@dhp/avatar-schema';
 import { HandFrameStabilizer } from '../src/filters.js';
 
 function hand(side: 'left' | 'right', x: number, score = 0.8): HandData {
@@ -14,6 +14,18 @@ function hand(side: 'left' | 'right', x: number, score = 0.8): HandData {
 
 function frame(hands: HandData[], timestampMs = 0): HandFrame {
   return { timestampMs, source: 'test', hands };
+}
+
+function poseFrame(leftX: number, rightX: number, timestampMs = 0): PoseFrame {
+  return {
+    timestampMs,
+    source: 'test-pose',
+    confidence: 0.95,
+    landmarks: [
+      { name: 'left_wrist', x: leftX, y: 0.5, z: 0, visibility: 0.95 },
+      { name: 'right_wrist', x: rightX, y: 0.5, z: 0, visibility: 0.95 },
+    ],
+  };
 }
 
 describe('HandFrameStabilizer', () => {
@@ -32,6 +44,19 @@ describe('HandFrameStabilizer', () => {
     ], 50));
     expect(flipped.hands.find((item) => item.handedness === 'left')?.landmarks[0].x).toBe(0.22);
     expect(flipped.hands.find((item) => item.handedness === 'right')?.landmarks[0].x).toBe(0.78);
+  });
+
+  it('首帧标签不可靠时用 Pose 左右腕点校正手部身份', () => {
+    const stabilizer = new HandFrameStabilizer();
+    const corrected = stabilizer.apply(
+      frame([
+        hand('right', 0.8, 0.9), // 原始标签反了，但位置贴近 Pose 左腕
+        hand('left', 0.2, 0.9),
+      ]),
+      poseFrame(0.8, 0.2),
+    );
+    expect(corrected.hands.find((item) => item.handedness === 'left')?.landmarks[0].x).toBe(0.8);
+    expect(corrected.hands.find((item) => item.handedness === 'right')?.landmarks[0].x).toBe(0.2);
   });
 
   it('进入/退出阈值使用迟滞，短暂低置信度不会闪断', () => {
