@@ -2,15 +2,22 @@ import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import { Object3D, Vector3 } from 'three';
 import { GLTFLoader, type GLTF } from 'three/addons/loaders/GLTFLoader.js';
-import { VRM_FINGER_TO_RIG, VRM_HUMANOID_TO_RIG, type StandardRigBone } from '@dhp/avatar-schema';
+import {
+  VRM_FINGER_TO_RIG,
+  VRM_HUMANOID_TO_RIG,
+  createDefaultProfile,
+  type StandardRigBone,
+} from '@dhp/avatar-schema';
 import {
   collectGltfNodesByIndex,
   correctVrm0Facing,
   extractVrm0ExpressionGroups,
   extractVrm0RigMap,
+  loadImportedAvatarFromBuffer,
   readGlbJson,
   VRM_LOADER_OPTIONS,
 } from '../src/imported.js';
+import { AvatarPackage } from '../src/avatar-package.js';
 
 const SAMPLE_A_URL = new URL('../../../assets/base-avatars/samples/AvatarSample_A.vrm', import.meta.url);
 const SEED_SAN_URL = new URL('../../../assets/base-avatars/samples/Seed-san.vrm', import.meta.url);
@@ -39,6 +46,26 @@ function stripTextures(buffer: ArrayBuffer): ArrayBuffer {
     delete m.occlusionTexture;
     delete m.emissiveTexture;
   }
+  // VRM 1.0 的 MToon 扩展还会在 extensions 内引用纹理；Node 测试需一并剥离。
+  const removeExtensionTextureRefs = (value: unknown): void => {
+    if (!value || typeof value !== 'object') return;
+    if (Array.isArray(value)) {
+      value.forEach(removeExtensionTextureRefs);
+      return;
+    }
+    for (const [key, child] of Object.entries(value as Record<string, unknown>)) {
+      if (/texture$/i.test(key)) delete (value as Record<string, unknown>)[key];
+      else removeExtensionTextureRefs(child);
+    }
+  };
+  removeExtensionTextureRefs(json.extensions);
+  removeExtensionTextureRefs(json.materials);
+  json.extensionsUsed = (json.extensionsUsed ?? []).filter(
+    (name: string) => name !== 'KHR_texture_basisu',
+  );
+  json.extensionsRequired = (json.extensionsRequired ?? []).filter(
+    (name: string) => name !== 'KHR_texture_basisu',
+  );
   const newJson = new TextEncoder().encode(JSON.stringify(json));
   const pad = (4 - (newJson.length % 4)) % 4;
   const jsonChunk = new Uint8Array(newJson.length + pad);
@@ -93,6 +120,43 @@ describe('readGlbJson（VRM 版本检测）', () => {
 describe('VRM 1.0 原始骨骼驱动', () => {
   it('关闭 normalized → raw bones 自动回写，避免 vrm.update 覆盖头部姿态', () => {
     expect(VRM_LOADER_OPTIONS.autoUpdateHumanBones).toBe(false);
+  });
+
+  it('预设动作使用 normalized T-Pose 骨架，再安全回写 raw 蒙皮骨骼', async () => {
+    const imported = await loadImportedAvatarFromBuffer(
+      stripTextures(readFile(SEED_SAN_URL)),
+      'Seed-san.vrm',
+    );
+    expect(imported.vrm).toBeDefined();
+    expect(imported.animationRigMap?.size).toBeGreaterThanOrEqual(17);
+    expect(imported.animationRigMap?.get('LeftUpperArm')).not.toBe(
+      imported.rigMap.get('LeftUpperArm'),
+    );
+
+    const pkg = new AvatarPackage({
+      profile: createDefaultProfile(),
+      imported,
+    });
+    expect(pkg.playAnimation('idle-01')).toBe(true);
+    pkg.update(0.6);
+    imported.root.updateMatrixWorld(true);
+
+    const leftDirection = imported.rigMap
+      .get('LeftLowerArm')!
+      .getWorldPosition(new Vector3())
+      .sub(imported.rigMap.get('LeftUpperArm')!.getWorldPosition(new Vector3()))
+      .normalize();
+    const rightDirection = imported.rigMap
+      .get('RightLowerArm')!
+      .getWorldPosition(new Vector3())
+      .sub(imported.rigMap.get('RightUpperArm')!.getWorldPosition(new Vector3()))
+      .normalize();
+    expect(imported.vrm!.humanoid.autoUpdateHumanBones).toBe(true);
+    expect(leftDirection.x).toBeGreaterThan(0);
+    expect(rightDirection.x).toBeLessThan(0);
+    expect(leftDirection.y).toBeLessThan(-0.5);
+    expect(rightDirection.y).toBeLessThan(-0.5);
+    pkg.dispose();
   });
 });
 

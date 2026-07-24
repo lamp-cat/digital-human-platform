@@ -100,6 +100,8 @@ export class AvatarPackage {
   private mixer: AnimationMixer;
   private clips = new Map<string, AnimationClip>();
   private currentAction: AnimationAction | null = null;
+  /** 预设动作实际写入的骨骼；VRM 1.0 使用 normalized T-Pose 骨架。 */
+  private animationBones = new Map<StandardRigBone, Object3D>();
   /** 停止动作后回 bind pose 的插值状态。 */
   private restoreT = -1;
   private restoreEntries: RestoreEntry[] = [];
@@ -118,10 +120,10 @@ export class AvatarPackage {
       this.driver = opts.imported.driver;
       this.expressionDriver = createImportedExpressionDriver(opts.imported);
       // 预置动作重定向到实际骨骼名（预置动作只含 22 根最小骨架，手指骨骼跳过）
-      const animationRigMap = new Map<StandardRigBone, Object3D>();
-      for (const [bone, node] of opts.imported.rigMap) {
+      const animationSource = opts.imported.animationRigMap ?? opts.imported.rigMap;
+      for (const [bone, node] of animationSource) {
         if ((STANDARD_RIG_BONES as readonly string[]).includes(bone)) {
-          animationRigMap.set(bone as StandardRigBone, node);
+          this.animationBones.set(bone as StandardRigBone, node);
         }
       }
       const avatarHeight = new Box3()
@@ -130,7 +132,7 @@ export class AvatarPackage {
       const positionScale =
         Number.isFinite(avatarHeight) && avatarHeight > 0.2 ? avatarHeight / 1.7 : 1;
       for (const [id, clip] of createPresetClips()) {
-        this.clips.set(id, retargetClipToRig(clip, animationRigMap, positionScale));
+        this.clips.set(id, retargetClipToRig(clip, this.animationBones, positionScale));
       }
     } else {
       this.base = opts.avatar ?? createBaseAvatar();
@@ -142,12 +144,18 @@ export class AvatarPackage {
       this.driver = createRigDriver(boneMap, this.root);
       this.expressionDriver = createBaseExpressionDriver(this.base);
       for (const [id, clip] of createPresetClips()) this.clips.set(id, clip);
+      for (const [bone, node] of boneMap) this.animationBones.set(bone, node);
     }
     this.mixer = new AnimationMixer(this.root);
 
     // 记录驱动骨骼的绑定局部姿态（供 stopAnimation 回位）
     for (const [, obj] of this.driver.bones) {
       this.bindLocal.set(obj, { quat: obj.quaternion.clone(), pos: obj.position.clone() });
+    }
+    for (const [, obj] of this.animationBones) {
+      if (!this.bindLocal.has(obj)) {
+        this.bindLocal.set(obj, { quat: obj.quaternion.clone(), pos: obj.position.clone() });
+      }
     }
 
     // 初始应用 Profile（内置底模）
@@ -250,6 +258,7 @@ export class AvatarPackage {
   playAnimation(id: PresetAnimationId | string): boolean {
     const clip = this.clips.get(id);
     if (!clip) return false;
+    this.setNormalizedAnimationMode(true);
     this.cancelRestore();
     const action = this.mixer.clipAction(clip);
     const playback = PRESET_ANIMATION_PLAYBACK[id as PresetAnimationId] ?? { loop: true };
@@ -275,6 +284,7 @@ export class AvatarPackage {
 
   /** 摄像头姿态/手部驱动：写入世界系旋转增量（见 rig-driver）。 */
   applyBoneRotations(rotations: Partial<Record<ExtendedRigBone, QuatLike>>): void {
+    this.setNormalizedAnimationMode(false);
     this.cancelRestore();
     applyBoneRotations(this.driver, rotations);
   }
@@ -299,7 +309,6 @@ export class AvatarPackage {
   /** 每帧推进（动画混合与回位插值）。 */
   update(dt: number): void {
     this.mixer.update(dt);
-    this.imported?.vrm?.update(dt);
     if (this.restoreT >= 0) {
       this.restoreT = Math.min(1, this.restoreT + dt / 0.25);
       const t = this.restoreT;
@@ -313,6 +322,8 @@ export class AvatarPackage {
         this.restoreEntries = [];
       }
     }
+    // normalized 动画与回位都完成后，再把姿态同步到 VRM raw 蒙皮骨骼。
+    this.imported?.vrm?.update(dt);
   }
 
   /** 释放几何、材质与动画资源。 */
@@ -379,5 +390,19 @@ export class AvatarPackage {
   private cancelRestore(): void {
     this.restoreT = -1;
     this.restoreEntries = [];
+  }
+
+  /**
+   * VRM 1.0 在预设动画时使用 three-vrm 的 normalized T-Pose 骨架；
+   * 摄像头驱动时切回 raw 骨架。两条路径不同时写同一组节点。
+   */
+  private setNormalizedAnimationMode(enabled: boolean): void {
+    const humanoid = this.imported?.vrm?.humanoid;
+    if (!humanoid || !this.imported?.animationRigMap) return;
+    if (enabled && !humanoid.autoUpdateHumanBones) {
+      // 从当前 raw 姿态接入 normalized，避免摄像头 → 预设动作时首帧跳变。
+      humanoid.setNormalizedPose(humanoid.getRawPose());
+    }
+    humanoid.autoUpdateHumanBones = enabled;
   }
 }

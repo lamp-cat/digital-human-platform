@@ -34,7 +34,7 @@ export const PRESET_ANIMATION_DEFINITIONS: readonly {
   stance: 'standing' | 'seated' | 'transition';
 }[] = [
   { id: 'idle-01', label: '待机', loop: true, stance: 'standing' },
-  { id: 'wave-01', label: '挥手', loop: true, stance: 'standing' },
+  { id: 'wave-01', label: '右手挥手', loop: true, stance: 'standing' },
   { id: 'walk-01', label: '走路', loop: true, stance: 'standing' },
   { id: 'sit-down-01', label: '坐下', loop: false, stance: 'transition' },
   { id: 'stand-up-01', label: '站起', loop: false, stance: 'transition' },
@@ -48,6 +48,10 @@ export const PRESET_ANIMATION_PLAYBACK = Object.fromEntries(
 ) as Record<PresetAnimationId, { loop: boolean }>;
 
 const DEG = Math.PI / 180;
+const LEFT_ARM_RELAXED_Z = -72;
+const RIGHT_ARM_RELAXED_Z = 72;
+const LEFT_ARM_RAISED_Z = 58;
+const RIGHT_ARM_RAISED_Z = -58;
 
 function quatOf(xDeg: number, yDeg: number, zDeg: number): Quaternion {
   return new Quaternion().setFromEuler(new Euler(xDeg * DEG, yDeg * DEG, zDeg * DEG));
@@ -76,8 +80,16 @@ function makeIdleClip(): AnimationClip {
   const tracks = [
     quatTrack('Spine', [0, 1.5, 3], [[0, 0, 0], [1.5, 0, 0], [0, 0, 0]]),
     quatTrack('Chest', [0, 1.5, 3], [[0, 0, 0], [2, 0, 0], [0, 0, 0]]),
-    quatTrack('LeftUpperArm', [0, 1.5, 3], [[0, 0, -72], [1, 0, -69], [0, 0, -72]]),
-    quatTrack('RightUpperArm', [0, 1.5, 3], [[0, 0, 72], [1, 0, 69], [0, 0, 72]]),
+    quatTrack('LeftUpperArm', [0, 1.5, 3], [
+      [0, 0, LEFT_ARM_RELAXED_Z],
+      [1, 0, -69],
+      [0, 0, LEFT_ARM_RELAXED_Z],
+    ]),
+    quatTrack('RightUpperArm', [0, 1.5, 3], [
+      [0, 0, RIGHT_ARM_RELAXED_Z],
+      [1, 0, 69],
+      [0, 0, RIGHT_ARM_RELAXED_Z],
+    ]),
     quatTrack('LeftLowerArm', [0, 1.5, 3], [[0, 0, -8], [0, 0, -11], [0, 0, -8]]),
     quatTrack('RightLowerArm', [0, 1.5, 3], [[0, 0, 8], [0, 0, 11], [0, 0, 8]]),
     vecTrack('Hips', [0, 1.5, 3], [
@@ -89,20 +101,31 @@ function makeIdleClip(): AnimationClip {
   return new AnimationClip('idle-01', 3, tracks);
 }
 
-/** 挥手：右臂举起挥动，2s。 */
+/** 右手挥手：始终保持在人物自身右侧，不越过身体中线。 */
 function makeWaveClip(): AnimationClip {
   const t = [0, 0.35, 1.7, 2];
   const tracks = [
-    quatTrack('LeftUpperArm', t, [[0, 0, -72], [0, 0, -72], [0, 0, -72], [0, 0, -72]]),
-    // 右臂绕 Z 轴抬起至头顶侧
-    quatTrack('RightUpperArm', t, [[0, 0, 72], [0, 0, -140], [0, 0, -140], [0, 0, 72]]),
+    quatTrack('LeftUpperArm', t, [
+      [0, 0, LEFT_ARM_RELAXED_Z],
+      [0, 0, LEFT_ARM_RELAXED_Z],
+      [0, 0, LEFT_ARM_RELAXED_Z],
+      [0, 0, LEFT_ARM_RELAXED_Z],
+    ]),
+    // 右臂从自然下垂转到右上方。旧值 -140° 会把右臂甩到人物左侧。
+    quatTrack('RightUpperArm', t, [
+      [0, 0, RIGHT_ARM_RELAXED_Z],
+      [0, 0, RIGHT_ARM_RAISED_Z],
+      [0, 0, RIGHT_ARM_RAISED_Z],
+      [0, 0, RIGHT_ARM_RELAXED_Z],
+    ]),
     // 前臂来回摆动（挥手）
     quatTrack(
       'RightLowerArm',
       [0, 0.35, 0.65, 0.95, 1.25, 1.55, 2],
-      [[0, 0, 8], [0, 0, -20], [0, 0, -55], [0, 0, -20], [0, 0, -55], [0, 0, -20], [0, 0, 8]],
+      [[0, 0, 8], [0, 0, -24], [0, 0, -46], [0, 0, -24], [0, 0, -46], [0, 0, -24], [0, 0, 8]],
     ),
-    quatTrack('Head', t, [[0, 0, 0], [0, 0, -6], [0, 0, -6], [0, 0, 0]]),
+    // 头部轻微向人物右侧（画面左侧）回应挥手。
+    quatTrack('Head', t, [[0, 0, 0], [0, 0, 6], [0, 0, 6], [0, 0, 0]]),
     quatTrack('Spine', [0, 0.35, 2], [[0, 0, 0], [0, 0, 3], [0, 0, 0]]),
   ];
   return new AnimationClip('wave-01', 2, tracks);
@@ -116,8 +139,16 @@ function makeWalkClip(): AnimationClip {
     quatTrack('RightUpperLeg', half, [[28, 0, 0], [-28, 0, 0], [28, 0, 0]]),
     quatTrack('LeftLowerLeg', half, [[10, 0, 0], [45, 0, 0], [10, 0, 0]]),
     quatTrack('RightLowerLeg', half, [[45, 0, 0], [10, 0, 0], [45, 0, 0]]),
-    quatTrack('LeftUpperArm', half, [[22, 0, -72], [-22, 0, -72], [22, 0, -72]]),
-    quatTrack('RightUpperArm', half, [[-22, 0, 72], [22, 0, 72], [-22, 0, 72]]),
+    quatTrack('LeftUpperArm', half, [
+      [22, 0, LEFT_ARM_RELAXED_Z],
+      [-22, 0, LEFT_ARM_RELAXED_Z],
+      [22, 0, LEFT_ARM_RELAXED_Z],
+    ]),
+    quatTrack('RightUpperArm', half, [
+      [-22, 0, RIGHT_ARM_RELAXED_Z],
+      [22, 0, RIGHT_ARM_RELAXED_Z],
+      [-22, 0, RIGHT_ARM_RELAXED_Z],
+    ]),
     quatTrack('Spine', half, [[2, 0, 0], [2, 0, 0], [2, 0, 0]]),
     vecTrack('Hips', [0, 0.25, 0.5, 0.75, 1], [
       HIPS_POS,
@@ -207,12 +238,25 @@ function makeBellyLaughClip(): AnimationClip {
   ]);
 }
 
-/** 欢呼：双臂上举，身体轻微弹跳。 */
+/** 欢呼：双臂在各自身体侧上举，身体轻微弹跳。 */
 function makeCheerClip(): AnimationClip {
   const t = [0, 0.35, 0.7, 1.05, 1.4];
   return new AnimationClip('cheer-01', 1.4, [
-    quatTrack('LeftUpperArm', t, [[0, 0, -72], [0, 0, 135], [0, 0, 150], [0, 0, 135], [0, 0, -72]]),
-    quatTrack('RightUpperArm', t, [[0, 0, 72], [0, 0, -135], [0, 0, -150], [0, 0, -135], [0, 0, 72]]),
+    // 旧值 ±135°/±150° 会让双臂互相穿过胸口；±58° 保持左右解剖侧。
+    quatTrack('LeftUpperArm', t, [
+      [0, 0, LEFT_ARM_RELAXED_Z],
+      [0, 0, 38],
+      [0, 0, LEFT_ARM_RAISED_Z],
+      [0, 0, 38],
+      [0, 0, LEFT_ARM_RELAXED_Z],
+    ]),
+    quatTrack('RightUpperArm', t, [
+      [0, 0, RIGHT_ARM_RELAXED_Z],
+      [0, 0, -38],
+      [0, 0, RIGHT_ARM_RAISED_Z],
+      [0, 0, -38],
+      [0, 0, RIGHT_ARM_RELAXED_Z],
+    ]),
     quatTrack('LeftLowerArm', t, [[0, 0, -8], [0, 0, 18], [0, 0, 8], [0, 0, 18], [0, 0, -8]]),
     quatTrack('RightLowerArm', t, [[0, 0, 8], [0, 0, -18], [0, 0, -8], [0, 0, -18], [0, 0, 8]]),
     quatTrack('Chest', t, [[0, 0, 0], [-5, 0, 0], [-8, 0, 0], [-5, 0, 0], [0, 0, 0]]),

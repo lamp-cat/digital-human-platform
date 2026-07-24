@@ -312,6 +312,63 @@ describe('预置动作', () => {
     }
   });
 
+  it('所有预设动作的左右上臂始终留在人物各自身体侧，不穿过中线', () => {
+    for (const [id, clip] of createPresetClips()) {
+      const { bones, rootBone } = buildStandardSkeleton();
+      const root = new Group();
+      root.add(rootBone);
+      const mixer = new AnimationMixer(root);
+      const action = mixer.clipAction(clip).play();
+
+      for (let frame = 0; frame <= 20; frame++) {
+        mixer.setTime((clip.duration * frame) / 20);
+        root.updateMatrixWorld(true);
+        const leftDirection = bones.LeftLowerArm
+          .getWorldPosition(new Vector3())
+          .sub(bones.LeftUpperArm.getWorldPosition(new Vector3()))
+          .normalize();
+        const rightDirection = bones.RightLowerArm
+          .getWorldPosition(new Vector3())
+          .sub(bones.RightUpperArm.getWorldPosition(new Vector3()))
+          .normalize();
+        expect(leftDirection.x, `${id} 左上臂 frame=${frame}`).toBeGreaterThanOrEqual(-0.02);
+        expect(rightDirection.x, `${id} 右上臂 frame=${frame}`).toBeLessThanOrEqual(0.02);
+      }
+
+      action.stop();
+    }
+  });
+
+  it('右手挥手和欢呼使用解剖学左右，不把手臂抬到对侧', () => {
+    const sampleElbows = (clipId: 'wave-01' | 'cheer-01', time: number) => {
+      const { bones, rootBone } = buildStandardSkeleton();
+      const root = new Group();
+      root.add(rootBone);
+      const mixer = new AnimationMixer(root);
+      mixer.clipAction(createPresetClips().get(clipId)!).play();
+      mixer.setTime(time);
+      root.updateMatrixWorld(true);
+      return {
+        leftShoulder: bones.LeftUpperArm.getWorldPosition(new Vector3()),
+        leftElbow: bones.LeftLowerArm.getWorldPosition(new Vector3()),
+        rightShoulder: bones.RightUpperArm.getWorldPosition(new Vector3()),
+        rightElbow: bones.RightLowerArm.getWorldPosition(new Vector3()),
+      };
+    };
+
+    const wave = sampleElbows('wave-01', 0.35);
+    expect(wave.rightElbow.x).toBeLessThan(wave.rightShoulder.x);
+    expect(wave.rightElbow.y).toBeGreaterThan(wave.rightShoulder.y + 0.18);
+    expect(wave.leftElbow.x).toBeGreaterThan(wave.leftShoulder.x);
+    expect(wave.leftElbow.y).toBeLessThan(wave.leftShoulder.y - 0.18);
+
+    const cheer = sampleElbows('cheer-01', 0.7);
+    expect(cheer.leftElbow.x).toBeGreaterThan(cheer.leftShoulder.x);
+    expect(cheer.rightElbow.x).toBeLessThan(cheer.rightShoulder.x);
+    expect(cheer.leftElbow.y).toBeGreaterThan(cheer.leftShoulder.y + 0.18);
+    expect(cheer.rightElbow.y).toBeGreaterThan(cheer.rightShoulder.y + 0.18);
+  });
+
   it('导入骨架存在非单位 bind rotation 时，重定向仍从 bind 起步并保持世界动作方向', () => {
     const { bones, rootBone } = buildStandardSkeleton();
     const root = new Group();
@@ -338,10 +395,10 @@ describe('预置动作', () => {
     mixer.update(0.35);
     root.updateMatrixWorld(true);
     const actual = bones.RightUpperArm.getWorldQuaternion(new Quaternion());
-    // t=0.35：Spine +3° 与 RightUpperArm -140° 同轴叠加，世界增量为 -137°。
+    // t=0.35：Spine +3° 与 RightUpperArm -58° 同轴叠加，世界增量为 -55°。
     const standardDelta = new Quaternion().setFromAxisAngle(
       new Vector3(0, 0, 1),
-      (-137 * Math.PI) / 180,
+      (-55 * Math.PI) / 180,
     );
     const expected = standardDelta.multiply(bindRightArmWorld);
     expect(actual.angleTo(expected)).toBeLessThan(0.02);

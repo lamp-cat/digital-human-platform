@@ -21,6 +21,11 @@ export interface ImportedAvatar {
   root: Group;
   /** StandardRig（含手指扩展骨骼）→ 实际骨骼节点。 */
   rigMap: Map<ExtendedRigBone, Object3D>;
+  /**
+   * VRM 1.0 的标准化 T-Pose 骨架，仅供预设动画。
+   * 摄像头仍写 raw rigMap，避免实时姿态和动画混在同一坐标系。
+   */
+  animationRigMap?: Map<StandardRigBone, Object3D>;
   driver: RigDriver;
   /** 第一个 SkinnedMesh 的骨架（存在时）。 */
   skeleton: Skeleton | null;
@@ -36,7 +41,7 @@ export interface MorphTargetBinding {
   scale: number;
 }
 
-/** VRM 1.0 必须保留平台直接写入的 raw human bones，禁止 normalized 骨架自动回写。 */
+/** VRM 1.0 初始使用 raw bones；播放预设动作时由 AvatarPackage 临时启用 normalized 回写。 */
 export const VRM_LOADER_OPTIONS = {
   autoUpdateHumanBones: false,
 } as const;
@@ -335,6 +340,7 @@ export async function loadImportedAvatarFromBuffer(
   root.updateMatrixWorld(true);
 
   const rigMap = new Map<ExtendedRigBone, Object3D>();
+  let animationRigMap: Map<StandardRigBone, Object3D> | undefined;
   let vrm: VRM | undefined;
   let legacyExpressionGroups: Map<FaceExpressionName, MorphTargetBinding[]> | undefined;
   if (isVrm0) {
@@ -347,13 +353,16 @@ export async function loadImportedAvatarFromBuffer(
   } else if (isVrm1) {
     vrm = gltf.userData.vrm as VRM | undefined;
     if (vrm) {
-      // 通过 VRM Humanoid 显式映射取骨（22 根最小骨架 + 手指扩展骨骼）
+      animationRigMap = new Map<StandardRigBone, Object3D>();
+      // raw bones 供摄像头驱动；normalized bones 供跨模型预设动画。
       for (const [vrmName, rigBone] of Object.entries(VRM_HUMANOID_TO_RIG)) {
-        const node = vrm.humanoid.getBoneNode(vrmName as VRMHumanBoneName);
-        if (node) rigMap.set(rigBone, node);
+        const rawNode = vrm.humanoid.getRawBoneNode(vrmName as VRMHumanBoneName);
+        const normalizedNode = vrm.humanoid.getNormalizedBoneNode(vrmName as VRMHumanBoneName);
+        if (rawNode) rigMap.set(rigBone, rawNode);
+        if (normalizedNode) animationRigMap.set(rigBone, normalizedNode);
       }
       for (const [vrmName, rigBone] of Object.entries(VRM_FINGER_TO_RIG)) {
-        const node = vrm.humanoid.getBoneNode(vrmName as VRMHumanBoneName);
+        const node = vrm.humanoid.getRawBoneNode(vrmName as VRMHumanBoneName);
         if (node && !rigMap.has(rigBone)) rigMap.set(rigBone, node);
       }
     }
@@ -375,6 +384,7 @@ export async function loadImportedAvatarFromBuffer(
     kind: isVrm ? 'vrm' : 'glb',
     root,
     rigMap,
+    animationRigMap,
     driver,
     skeleton,
     vrm,
