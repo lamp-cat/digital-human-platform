@@ -31,11 +31,13 @@ const IDENTITY = new Quaternion();
  * v2 = 绝对方向映射：骨骼世界方向直接对齐关键点世界方向
  *      （worldLandmarks 优先，米制、深度可靠），与校准姿势无关
  *      （站立预备即可校准，不再要求 A/T Pose 对齐绑定姿态）。
+ * v3 = 延续 v2 的肢体绝对映射；头部改为相对校准姿态的旋转增量，
+ *      消除肩→鼻向量固有的前倾/俯视偏差。
  *      注：实验过校准帧坐标系修正（frameRotation），实测会把检测器
  *      系统噪声注入映射、误差反而增大（离线评估 18.0° vs 15.8°），故不采用——
  *      image/world landmarks 与预览画面同系，原样复现才符合用户观感。
  */
-export const MAPPER_VERSION = 'absolute-world-v2';
+export const MAPPER_VERSION = 'absolute-world-v3';
 
 /**
  * 绑定姿态（T-Pose，面向 +Z，Y 向上）下各肢体段的世界方向。
@@ -131,6 +133,24 @@ export function mapPoseFrameToBoneRotations(
     result[bone] = { x: scaled.x, y: scaled.y, z: scaled.z, w: scaled.w };
   };
 
+  const emitRelativeDelta = (
+    segment: DrivenSegment,
+    bone: StandardRigBone,
+    current: Vector3 | null,
+    maxAngle?: number,
+  ) => {
+    const rest = calibration.restDirections[segment];
+    if (!current || current.lengthSq() < 1e-10 || !rest) {
+      emitDelta(segment, bone, current, maxAngle);
+      return;
+    }
+    const restV = new Vector3(rest.x, rest.y, rest.z);
+    if (restV.lengthSq() < 1e-10) return;
+    const q = new Quaternion().setFromUnitVectors(restV.normalize(), current.normalize());
+    if (maxAngle !== undefined) clampQuaternionAngle(q, maxAngle);
+    result[bone] = { x: q.x, y: q.y, z: q.z, w: q.w };
+  };
+
   // 四肢：绝对方向对齐，不限角（膝盖反向由方向向量自然表达）
   for (const [segment, [from, to]] of Object.entries(SEGMENT_ENDPOINTS)) {
     if (upperBodyOnly && LEG_SEGMENTS.has(segment)) continue; // 上半身模式：双腿不驱动
@@ -159,13 +179,14 @@ export function mapPoseFrameToBoneRotations(
     emitDelta('hips', 'Hips', hipsCurrent, maxHipsTurn);
   }
 
-  // 头部：肩中点 → 鼻，限最大偏转角
+  // 头部：肩中点 → 鼻相对校准姿态的增量。不能直接对齐 +Y：
+  // 鼻子天然位于头部前方，绝对方向会把这段解剖偏移误判成持续低头。
   const headCurrent = (() => {
     const shoulderMid = mid('left_shoulder', 'right_shoulder');
     const nose = point('nose');
     return shoulderMid && nose ? nose.sub(shoulderMid) : null;
   })();
-  emitDelta('head', 'Head', headCurrent, maxHeadTurn);
+  emitRelativeDelta('head', 'Head', headCurrent, maxHeadTurn);
 
   return result;
 }

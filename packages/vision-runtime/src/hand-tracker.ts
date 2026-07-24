@@ -32,14 +32,10 @@ export interface HandTrackerOptions {
 /**
  * MediaPipe HandLandmarker 结果 → HandFrame。
  *
- * handedness 语义转换（关键）：
- * 官方文档（developers.google.com/mediapipe/solutions/vision/hand_landmarker）：
- * “Handedness is determined assuming the input image is mirrored, i.e., taken
- *  with a front-facing/selfie camera with images flipped horizontally.
- *  If it is not the case, please swap the handedness output.”
- * 本平台输入是 getUserMedia 的原始（未水平翻转）前置画面，因此必须交换标签：
- * 模型输出 'Left' 实为解剖学右手，'Right' 实为解剖学左手。
- * 转换后 HandFrame.handedness 一律为解剖学语义（mirror=false：用户右手 → 数字人右手）。
+ * handedness 语义：
+ * 当前 Hand Landmarker task 对浏览器摄像头结果已输出解剖学 Left/Right。
+ * 预览区的 CSS 镜像只改变显示，不改变传给 detectForVideo 的原始视频像素，
+ * 因此这里直接保留模型标签；再次交换会造成真人左右手驱动反转。
  */
 export function handResultToHandFrame(result: HandLandmarkerResult, timestampMs: number): HandFrame {
   const hands: HandData[] = [];
@@ -50,8 +46,7 @@ export function handResultToHandFrame(result: HandLandmarkerResult, timestampMs:
     const world = result.worldLandmarks?.[i];
     const category = result.handedness?.[i]?.[0];
     const rawLabel = category?.categoryName ?? 'Left';
-    // 未镜像前置画面 → 交换（见上方注释依据）
-    const handedness: 'left' | 'right' = rawLabel === 'Left' ? 'right' : 'left';
+    const handedness: 'left' | 'right' = rawLabel.toLowerCase() === 'right' ? 'right' : 'left';
     const score = category?.score ?? 0;
     const out: HandLandmark[] = [];
     for (let j = 0; j < landmarks.length && j < HAND_LANDMARK_NAMES.length; j++) {

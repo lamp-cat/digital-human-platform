@@ -31,7 +31,7 @@ export const handLandmarkSchema = z.object({
 });
 export type HandLandmark = z.infer<typeof handLandmarkSchema>;
 
-/** 一只手的检出结果。handedness 一律为解剖学语义（转换见 vision-runtime hand-tracker）。 */
+/** 一只手的检出结果。handedness 一律为解剖学语义（归一化见 vision-runtime hand-tracker）。 */
 export const handDataSchema = z.object({
   handedness: z.enum(['left', 'right']),
   score: z.number().min(0).max(1),

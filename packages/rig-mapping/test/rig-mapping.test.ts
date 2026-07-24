@@ -137,6 +137,31 @@ describe('calibrate + mapPoseFrameToBoneRotations', () => {
     expect(angle).toBeGreaterThan(0.5); // 但确实有显著偏转
   });
 
+  it('头部以校准姿态为中立位，不把鼻子的固有前向深度误判为低头', () => {
+    const neutral = makeFrame(T_POSE);
+    for (const lm of neutral.landmarks) {
+      if (lm.name === 'left_shoulder') {
+        Object.assign(lm, { wx: 0.2, wy: 0, wz: 0 });
+      } else if (lm.name === 'right_shoulder') {
+        Object.assign(lm, { wx: -0.2, wy: 0, wz: 0 });
+      } else if (lm.name === 'nose') {
+        // 平台世界坐标为 (0, 0.35, 0.18)：鼻子相对肩部天然向前，
+        // 旧绝对映射会产生约 27° 的持续俯仰偏差。
+        Object.assign(lm, { wx: 0, wy: -0.35, wz: -0.18 });
+      }
+    }
+    const calibration = calibrate([neutral, structuredClone(neutral)]);
+    const rotations = mapPoseFrameToBoneRotations(structuredClone(neutral), calibration);
+    expect(rotations.Head).toBeDefined();
+    expect(angleOf(rotations.Head!)).toBeLessThan(0.01);
+
+    const nodded = structuredClone(neutral);
+    const nose = nodded.landmarks.find((lm) => lm.name === 'nose')!;
+    Object.assign(nose, { wy: -0.24, wz: -0.30 });
+    const moved = mapPoseFrameToBoneRotations(nodded, calibration);
+    expect(angleOf(moved.Head!)).toBeGreaterThan(0.2);
+  });
+
   it('缺少必需关键点时校准报错', () => {
     const incomplete = makeFrame({ nose: [0.5, 0.15] });
     expect(() => calibrate([incomplete])).toThrow(/校准失败/);

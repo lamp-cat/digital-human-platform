@@ -9,6 +9,7 @@ import {
   extractVrm0ExpressionGroups,
   extractVrm0RigMap,
   readGlbJson,
+  VRM_LOADER_OPTIONS,
 } from '../src/imported.js';
 
 const SAMPLE_A_URL = new URL('../../../assets/base-avatars/samples/AvatarSample_A.vrm', import.meta.url);
@@ -86,6 +87,12 @@ describe('readGlbJson（VRM 版本检测）', () => {
     const json = readGlbJson(readFile(SEED_SAN_URL));
     expect(json?.extensions?.VRMC_vrm).toBeDefined();
     expect(json?.extensions?.VRM).toBeUndefined();
+  });
+});
+
+describe('VRM 1.0 原始骨骼驱动', () => {
+  it('关闭 normalized → raw bones 自动回写，避免 vrm.update 覆盖头部姿态', () => {
+    expect(VRM_LOADER_OPTIONS.autoUpdateHumanBones).toBe(false);
   });
 });
 

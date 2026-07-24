@@ -12,7 +12,7 @@ import { clampQuaternionAngle } from './mapper.js';
  * - 只输出 rigBones 集合里存在的骨骼（内置底模无手指骨骼 → 自动跳过）。
  *
  * 镜像语义：始终 mirror=false（解剖学对应，用户右手 → 数字人右手）。
- * HandFrame.handedness 已在 vision-runtime 完成「前置未镜像画面 → 解剖学」转换。
+ * HandFrame.handedness 已在 vision-runtime 统一为解剖学语义。
  */
 
 export type ExtendedBoneRotationMap = Partial<

@@ -36,6 +36,11 @@ export interface MorphTargetBinding {
   scale: number;
 }
 
+/** VRM 1.0 必须保留平台直接写入的 raw human bones，禁止 normalized 骨架自动回写。 */
+export const VRM_LOADER_OPTIONS = {
+  autoUpdateHumanBones: false,
+} as const;
+
 /** mixamo 常见命名 → StandardRig（显式映射，不靠猜测）。 */
 export const MIXAMO_TO_RIG: Record<string, StandardRigBone> = {
   mixamorigHips: 'Hips',
@@ -314,7 +319,14 @@ export async function loadImportedAvatarFromBuffer(
   const loader = new GLTFLoader();
   // three-vrm v3 的 VRMLoaderPlugin 只支持 VRM 1.0（VRMC_vrm）；
   // VRM 0.x（extensions.VRM）必须走普通 GLTFLoader，否则 humanoid 解析失败。
-  if (isVrm1) loader.register((parser) => new VRMLoaderPlugin(parser));
+  if (isVrm1) {
+    loader.register(
+      (parser) =>
+        // 默认 true 会在 vrm.update() 时把 normalized bones 回写到 raw bones，
+        // 覆盖平台刚写入的头部/肢体姿态。
+        new VRMLoaderPlugin(parser, VRM_LOADER_OPTIONS),
+    );
+  }
   // 0.x 的 MToon 材质扩展不在 extensionsRequired 中，
   // 会回退到 pbrMetallicRoughness 基础材质（显示效果可接受）。
   const gltf = await loader.parseAsync(buffer, '');
