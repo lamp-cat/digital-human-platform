@@ -149,7 +149,11 @@ export function MotionPage() {
     if (!handEnabledRef.current) return;
     const stabilized = handStabilizerRef.current.apply(frame, latestPoseFrameRef.current);
     const smoothed = handSmootherRef.current.apply(stabilized);
-    const rotations = handDriveRef.current.update(smoothed, smoothed.timestampMs);
+    const rotations = handDriveRef.current.update(
+      smoothed,
+      smoothed.timestampMs,
+      latestPoseFrameRef.current,
+    );
     controllerRef.current?.pkg?.applyBoneRotations(rotations);
     const left = smoothed.hands.some((h) => h.handedness === 'left' && h.score >= 0.5);
     const right = smoothed.hands.some((h) => h.handedness === 'right' && h.score >= 0.5);
@@ -205,6 +209,10 @@ export function MotionPage() {
         kinematicPriorWeight: 0.4,
         temporalSmoothingMs: 45,
         maxAngularVelocityDegPerSec: 900,
+        handOrientationCalibrationFrames: 10,
+        handTemporalSmoothingMs: 120,
+        handMaxAngularVelocityDegPerSec: 300,
+        handRotationDeadbandDeg: 1.5,
       });
     }
     const tracker = new HandTracker({
@@ -236,6 +244,14 @@ export function MotionPage() {
     if (handEnabledRef.current) stopHandTracking();
     else void startHandTracking();
   }, [startHandTracking, stopHandTracking]);
+
+  const recalibrateHand = useCallback(() => {
+    handDriveRef.current.reset();
+    handStabilizerRef.current.reset();
+    handSmootherRef.current.reset();
+    setHandPresence('none');
+    resetHandBones();
+  }, [resetHandBones]);
 
   const stopFaceTracking = useCallback(() => {
     faceTrackerRef.current?.stop();
@@ -337,6 +353,10 @@ export function MotionPage() {
             kinematicPriorWeight: 0.4,
             temporalSmoothingMs: 45,
             maxAngularVelocityDegPerSec: 900,
+            handOrientationCalibrationFrames: 10,
+            handTemporalSmoothingMs: 120,
+            handMaxAngularVelocityDegPerSec: 300,
+            handRotationDeadbandDeg: 1.5,
           });
           setFingerSupport(
             (FINGER_EXTENSION_BONES as readonly string[]).some((b) => bones.has(b as ExtendedRigBone)),
@@ -705,8 +725,9 @@ export function MotionPage() {
             </h3>
             <p className="muted">
               24 FPS 双手 21 点追踪，融合 Pose 腕点身份校验、KalidoKit 指节运动学先验、
-              关键点与旋转双层平滑及异常翻转抑制。五指驱动需要 VRM 模型带手指骨骼；
-              内置底模仅手掌朝向生效。
+              Pose 掌根方向锚定、手掌/手指分级抗抖及异常翻转抑制。开启或重标后请将
+              双手自然张开放稳约半秒；五指驱动需要 VRM 模型带手指骨骼，内置底模仅
+              手掌朝向生效。
             </p>
             {fingerSupport !== null && (
               <p>
@@ -726,6 +747,11 @@ export function MotionPage() {
               >
                 {handEnabled ? '手部追踪：开' : '手部追踪：关'}
               </button>
+              {handEnabled && (
+                <button className="btn btn-sm" onClick={recalibrateHand}>
+                  重标手掌方向
+                </button>
+              )}
             </div>
             {handEnabled && (
               <p>

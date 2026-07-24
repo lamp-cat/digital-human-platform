@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { Quaternion, Vector3 } from 'three';
-import type { HandData, HandFrame, HandLandmark } from '@dhp/avatar-schema';
+import type { HandData, HandFrame, HandLandmark, PoseFrame } from '@dhp/avatar-schema';
 import {
   HandDriveManager,
   computeHandCurls,
@@ -126,6 +126,53 @@ function makeFrame(hands: HandData[], timestampMs = 0): HandFrame {
   return { timestampMs, source: 'test', hands };
 }
 
+function transformPoints(pts: Record<string, V3>, q: Quaternion): Record<string, V3> {
+  return Object.fromEntries(
+    Object.entries(pts).map(([name, value]) => {
+      const p = new Vector3(...value).applyQuaternion(q);
+      return [name, [p.x, p.y, p.z] as V3];
+    }),
+  );
+}
+
+function handFromPoints(side: 'left' | 'right', pts: Record<string, V3>): HandData {
+  return { handedness: side, score: 0.95, landmarks: toLandmarks(pts) };
+}
+
+function posePalmFrame(
+  side: 'left' | 'right',
+  pts: Record<string, V3>,
+  timestampMs: number,
+): PoseFrame {
+  const names = {
+    wrist: 'wrist',
+    index: 'index_finger_mcp',
+    pinky: 'pinky_mcp',
+  } as const;
+  return {
+    timestampMs,
+    source: 'test-pose',
+    confidence: 0.99,
+    landmarks: Object.entries(names).map(([posePart, handPart]) => {
+      const [x, y, z] = pts[handPart];
+      return {
+        name: `${side}_${posePart}`,
+        x: x + 0.5,
+        y: 0.5 - y,
+        z: -z,
+        visibility: 0.99,
+        wx: x,
+        wy: -y,
+        wz: -z,
+      };
+    }),
+  };
+}
+
+function quatOf(value: { x: number; y: number; z: number; w: number }): Quaternion {
+  return new Quaternion(value.x, value.y, value.z, value.w).normalize();
+}
+
 const FIVE = ['thumb', 'index', 'middle', 'ring', 'little'];
 
 describe('hand-mapper：手指屈伸', () => {
@@ -182,6 +229,21 @@ describe('hand-mapper：手指屈伸', () => {
     expect(idxAngle).toBeGreaterThan((60 * Math.PI) / 180);
   });
 
+  it.each(['left', 'right'] as const)(
+    '%s 手掌绕世界轴转动后保持同向，不产生镜像反射',
+    (side) => {
+      const turn = new Quaternion().setFromAxisAngle(
+        new Vector3(0.3, 0.7, 0.2).normalize(),
+        (40 * Math.PI) / 180,
+      );
+      const base = side === 'left' ? OPEN_LEFT : mirrorX(OPEN_LEFT);
+      const hand = handFromPoints(side, transformPoints(base, turn));
+      const { rotations } = mapHandFrameToBoneRotations(makeFrame([hand]));
+      const value = side === 'left' ? rotations.LeftHand! : rotations.RightHand!;
+      expect(quatOf(value).angleTo(turn)).toBeLessThan(0.02);
+    },
+  );
+
   it('KalidoKit 链式角先验补偿斜对镜头时的指节屈曲低估', () => {
     const hand: HandData = {
       handedness: 'left',
@@ -230,5 +292,59 @@ describe('HandDriveManager：丢失回退', () => {
     const mgr = new HandDriveManager();
     const out = mgr.update(null, 1000);
     expect(Object.keys(out)).toHaveLength(0);
+  });
+});
+
+describe('HandDriveManager：手掌方向标定与分级抗抖', () => {
+  it('用 Pose 掌根消除固定坐标偏差，向内/向外旋转方向不反转', () => {
+    const bias = new Quaternion().setFromAxisAngle(new Vector3(0, 1, 0), (35 * Math.PI) / 180);
+    const inward = new Quaternion().setFromAxisAngle(new Vector3(0, 0, 1), (30 * Math.PI) / 180);
+    const biasedNeutral = transformPoints(OPEN_LEFT, bias);
+    const movedRaw = transformPoints(biasedNeutral, inward);
+    const movedPose = transformPoints(OPEN_LEFT, inward);
+    const mgr = new HandDriveManager({
+      handOrientationCalibrationFrames: 1,
+      temporalSmoothingMs: 1,
+      maxAngularVelocityDegPerSec: 10000,
+      rotationDeadbandDeg: 0,
+      handTemporalSmoothingMs: 1,
+      handMaxAngularVelocityDegPerSec: 10000,
+      handRotationDeadbandDeg: 0,
+    });
+
+    const neutral = mgr.update(
+      makeFrame([handFromPoints('left', biasedNeutral)], 0),
+      0,
+      posePalmFrame('left', OPEN_LEFT, 0),
+    );
+    expect(quatOf(neutral.LeftHand!).angleTo(new Quaternion())).toBeLessThan(0.02);
+
+    const moved = mgr.update(
+      makeFrame([handFromPoints('left', movedRaw)], 100),
+      100,
+      posePalmFrame('left', movedPose, 100),
+    );
+    expect(quatOf(moved.LeftHand!).angleTo(inward)).toBeLessThan(0.03);
+  });
+
+  it('同样的突发角度下手掌步进小于手指，掌部不会把深度噪声放大成抽搐', () => {
+    const turn = new Quaternion().setFromAxisAngle(new Vector3(0, 0, 1), (45 * Math.PI) / 180);
+    const mgr = new HandDriveManager({
+      handOrientationCalibrationFrames: 0,
+      temporalSmoothingMs: 35,
+      maxAngularVelocityDegPerSec: 900,
+      rotationDeadbandDeg: 0,
+      handTemporalSmoothingMs: 140,
+      handMaxAngularVelocityDegPerSec: 240,
+      handRotationDeadbandDeg: 0,
+    });
+    mgr.update(makeFrame([makeHand('left', 'open')], 0), 0);
+    const moved = mgr.update(
+      makeFrame([handFromPoints('left', transformPoints(OPEN_LEFT, turn))], 42),
+      42,
+    );
+    const palmAngle = new Quaternion().angleTo(quatOf(moved.LeftHand!));
+    const fingerAngle = new Quaternion().angleTo(quatOf(moved.LeftIndexProximal!));
+    expect(palmAngle).toBeLessThan(fingerAngle * 0.65);
   });
 });

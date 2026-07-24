@@ -5,6 +5,7 @@ import {
   type ExtendedRigBone,
   type HandData,
   type HandFrame,
+  type PoseFrame,
 } from '@dhp/avatar-schema';
 import { landmarkToWorld } from './coords.js';
 import { clampQuaternionAngle } from './mapper.js';
@@ -89,7 +90,9 @@ function palmFrame(f: Vector3, u: Vector3, sign: 1 | -1) {
   const fn = f.clone().normalize();
   // 掌心外法线：左手 u×f，右手取反（双手互为镜像，叉积方向相反）
   const n = u.clone().cross(fn).normalize().multiplyScalar(sign);
-  const t = n.clone().cross(fn).normalize(); // 第三轴（横向）
+  // makeBasis 的三列必须满足 t×f=n。旧实现使用 n×f，得到的是行列式 -1 的
+  // 镜像矩阵：中立姿态下会被 bind 抵消，但掌心一转就会出现“向内变向外”。
+  const t = fn.clone().cross(n).normalize(); // 第三轴（横向）
   const m = new Matrix4().makeBasis(t, fn, n);
   return { quat: new Quaternion().setFromRotationMatrix(m), f: fn, n, t };
 }
@@ -221,11 +224,11 @@ function mapOneHand(
       }
       seg.normalize();
       // 相对「随手掌转动的绑定参考」的有符号夹角。
-      // 屈曲正方向：四指为负角（双手一致）；拇指因 flexion 轴（掌纵轴 f）随手性
+      // 屈曲正方向：四指沿经过手性修正的掌横轴均为正角；拇指因 flexion 轴（掌纵轴 f）随手性
       // 翻转，左手为正角、右手为负角 —— 用 bind.sign 统一换算成「屈曲为正」。
       const bend = signedAngleDeg(refCur, seg, axisCur);
       const maxCurlDegVal = isThumb ? maxThumbCurlDeg : maxCurlDeg;
-      const flexSign = isThumb ? bind.sign : -1;
+      const flexSign = isThumb ? bind.sign : 1;
       const measuredFlex = bend * flexSign;
       const priorLocalDeg = kinematicPrior.get(boneName);
       if (!isThumb && priorLocalDeg !== undefined) {
@@ -259,8 +262,8 @@ function buildRelaxRotations(side: Side, opts: { maxCurlDeg: number; maxThumbCur
     const isThumb = def.finger === 'Thumb';
     const axis = isThumb ? bind.f.clone() : bindFrame.t.clone();
     const curlDeg = Math.min(isThumb ? RELAX_THUMB_CURL_DEG : RELAX_CURL_DEG, isThumb ? opts.maxThumbCurlDeg : opts.maxCurlDeg);
-    // 屈曲正方向与 mapOneHand 一致（四指负角、拇指随手性）
-    const flexSign = isThumb ? bind.sign : -1;
+    // 屈曲正方向与 mapOneHand 一致（四指正角、拇指随手性）
+    const flexSign = isThumb ? bind.sign : 1;
     const appliedBend = curlDeg * flexSign;
     for (const joint of JOINT_NAMES) {
       const boneName = `${sidePrefix}${def.finger}${joint}` as ExtendedRigBone;
@@ -353,25 +356,85 @@ export interface HandDriveOptions extends MapHandOptions {
   maxAngularVelocityDegPerSec?: number;
   /** 小于该角度的抖动保持上一姿态，默认 0.6°。 */
   rotationDeadbandDeg?: number;
+  /**
+   * 手掌坐标系与 Pose 手腕/掌根坐标系的中立位对齐帧数，默认 10。
+   * 只校正 Hand Landmarker 的固定朝向偏差，不改变已解算的手指屈曲；设为 0 可关闭。
+   */
+  handOrientationCalibrationFrames?: number;
+  /** Hand 骨骼专用低通时间常数，默认 120ms；手指仍使用 temporalSmoothingMs。 */
+  handTemporalSmoothingMs?: number;
+  /** Hand 骨骼专用最大角速度，默认 300°/s。 */
+  handMaxAngularVelocityDegPerSec?: number;
+  /** Hand 骨骼专用旋转死区，默认 1.5°。 */
+  handRotationDeadbandDeg?: number;
+}
+
+interface HandDriveState {
+  lastGood: ExtendedBoneRotationMap;
+  lastGoodMs: number | null;
+  lastOutput: ExtendedBoneRotationMap;
+  lastOutputMs: number | null;
+  /** 右乘到手掌及各指节世界增量上的固定坐标系修正。 */
+  orientationCorrection: Quaternion | null;
+  orientationSamples: number;
+}
+
+function newHandDriveState(): HandDriveState {
+  return {
+    lastGood: {},
+    lastGoodMs: null,
+    lastOutput: {},
+    lastOutputMs: null,
+    orientationCorrection: null,
+    orientationSamples: 0,
+  };
+}
+
+/**
+ * Pose 的 wrist/index/pinky 比单手模型的深度朝向更稳定，且与整条手臂处于同一坐标系。
+ * 用它只做启动时的手掌坐标系锚点；逐指动作仍完全来自 21 点 Hand Landmarker。
+ */
+function posePalmDelta(
+  frame: PoseFrame | null | undefined,
+  side: Side,
+  handTimestampMs: number,
+  maxHandTurnDeg: number,
+): Quaternion | null {
+  if (!frame || Math.abs(frame.timestampMs - handTimestampMs) > 200) return null;
+  const landmarks = new Map(frame.landmarks.map((lm) => [lm.name, lm]));
+  const point = (part: 'wrist' | 'index' | 'pinky') => {
+    const lm = landmarks.get(`${side}_${part}`);
+    return lm && lm.visibility >= 0.5 ? landmarkToWorld(lm, false) : null;
+  };
+  const wrist = point('wrist');
+  const index = point('index');
+  const pinky = point('pinky');
+  if (!wrist || !index || !pinky) return null;
+  const f = index.clone().add(pinky).multiplyScalar(0.5).sub(wrist);
+  const u = pinky.clone().sub(index);
+  if (f.lengthSq() < 1e-8 || u.lengthSq() < 1e-8) return null;
+
+  const bind = SIDE_BIND[side];
+  const current = palmFrame(f, u, bind.sign);
+  const bindFrame = palmFrame(bind.f.clone(), bind.u.clone(), bind.sign);
+  const delta = bindFrame.quat.clone().invert().premultiply(current.quat);
+  clampQuaternionAngle(delta, maxHandTurnDeg * DEG);
+  return delta.normalize();
 }
 
 /**
  * 手部驱动状态机（每侧手独立）：
- * - 检出正常 → 输出当帧映射；
+ * - 检出正常 → 用 Pose 掌根完成短暂中立位对齐，再输出当帧映射；
+ * - Hand（手掌/腕部）使用比手指更强的死区、限速与低通，抑制深度噪声抽搐；
  * - 丢失 < freezeDelay → 沿用最近可信姿态；
  * - 之后按 blendDuration 平滑混合到「放松微屈绑定姿态」（不定格、不跳变）。
  */
 export class HandDriveManager {
   private freezeDelayMs: number;
   private blendDurationMs: number;
-  private states: Record<Side, {
-    lastGood: ExtendedBoneRotationMap;
-    lastGoodMs: number | null;
-    lastOutput: ExtendedBoneRotationMap;
-    lastOutputMs: number | null;
-  }> = {
-    left: { lastGood: {}, lastGoodMs: null, lastOutput: {}, lastOutputMs: null },
-    right: { lastGood: {}, lastGoodMs: null, lastOutput: {}, lastOutputMs: null },
+  private states: Record<Side, HandDriveState> = {
+    left: newHandDriveState(),
+    right: newHandDriveState(),
   };
 
   constructor(private opts: HandDriveOptions = {}) {
@@ -379,8 +442,15 @@ export class HandDriveManager {
     this.blendDurationMs = opts.blendDurationMs ?? 800;
   }
 
-  /** 每帧调用；frame 可为 null（本帧两只手都未检出）。 */
-  update(frame: HandFrame | null, nowMs: number): ExtendedBoneRotationMap {
+  /**
+   * 每帧调用；frame 可为 null（本帧两只手都未检出）。
+   * poseFrame 用于短暂中立位坐标系对齐，缺失时自动沿用原始手掌解算。
+   */
+  update(
+    frame: HandFrame | null,
+    nowMs: number,
+    poseFrame?: PoseFrame | null,
+  ): ExtendedBoneRotationMap {
     const mapped = mapHandFrameToBoneRotations(
       frame ?? { timestampMs: nowMs, source: 'none', hands: [] },
       this.opts,
@@ -396,7 +466,15 @@ export class HandDriveManager {
         ) as ExtendedBoneRotationMap;
 
       if (mapped.present[side]) {
-        state.lastGood = this.stabilizeRotations(state, sideBones(mapped.rotations), nowMs);
+        const raw = sideBones(mapped.rotations);
+        const poseDelta = posePalmDelta(
+          poseFrame,
+          side,
+          frame?.timestampMs ?? nowMs,
+          this.opts.maxHandTurnDeg ?? 150,
+        );
+        const aligned = this.alignPalmOrientation(state, side, raw, poseDelta);
+        state.lastGood = this.stabilizeRotations(state, aligned, nowMs);
         state.lastGoodMs = nowMs;
         Object.assign(out, state.lastGood);
         continue;
@@ -420,25 +498,73 @@ export class HandDriveManager {
         ...allowedRelax,
         [`${side === 'left' ? 'Left' : 'Right'}Hand` as ExtendedRigBone]: { x: 0, y: 0, z: 0, w: 1 },
       };
-      Object.assign(out, blendRotationMaps(state.lastGood, target, w));
+      const blended = blendRotationMaps(state.lastGood, target, w);
+      state.lastOutput = blended;
+      state.lastOutputMs = nowMs;
+      Object.assign(out, blended);
     }
     return out;
   }
 
   reset(): void {
     this.states = {
-      left: { lastGood: {}, lastGoodMs: null, lastOutput: {}, lastOutputMs: null },
-      right: { lastGood: {}, lastGoodMs: null, lastOutput: {}, lastOutputMs: null },
+      left: newHandDriveState(),
+      right: newHandDriveState(),
     };
   }
 
+  /**
+   * 启动后的前 N 个可靠帧估计 Hand→Pose 的固定坐标系修正：
+   * corrected = handDelta × (handDelta⁻¹ × poseDelta)。
+   * 修正右乘到 Hand 和所有指节，因此只替换掌部基准，不会破坏已经准确的屈指角。
+   */
+  private alignPalmOrientation(
+    state: HandDriveState,
+    side: Side,
+    target: ExtendedBoneRotationMap,
+    poseDelta: Quaternion | null,
+  ): ExtendedBoneRotationMap {
+    const handBone = `${side === 'left' ? 'Left' : 'Right'}Hand` as ExtendedRigBone;
+    const rawValue = target[handBone];
+    const calibrationFrames = Math.max(0, Math.round(this.opts.handOrientationCalibrationFrames ?? 10));
+    if (
+      rawValue &&
+      poseDelta &&
+      calibrationFrames > 0 &&
+      state.orientationSamples < calibrationFrames
+    ) {
+      const raw = new Quaternion(rawValue.x, rawValue.y, rawValue.z, rawValue.w).normalize();
+      const sample = raw.clone().invert().multiply(poseDelta).normalize();
+      if (state.orientationCorrection && state.orientationCorrection.dot(sample) < 0) {
+        sample.set(-sample.x, -sample.y, -sample.z, -sample.w);
+      }
+      state.orientationSamples += 1;
+      state.orientationCorrection = state.orientationCorrection
+        ? state.orientationCorrection
+            .clone()
+            .slerp(sample, 1 / state.orientationSamples)
+            .normalize()
+        : sample;
+    }
+
+    const correction = state.orientationCorrection;
+    if (!correction) return target;
+    const output: ExtendedBoneRotationMap = {};
+    for (const [bone, value] of Object.entries(target) as [
+      ExtendedRigBone,
+      NonNullable<ExtendedBoneRotationMap[ExtendedRigBone]>,
+    ][]) {
+      const q = new Quaternion(value.x, value.y, value.z, value.w)
+        .normalize()
+        .multiply(correction)
+        .normalize();
+      output[bone] = { x: q.x, y: q.y, z: q.z, w: q.w };
+    }
+    return output;
+  }
+
   private stabilizeRotations(
-    state: {
-      lastGood: ExtendedBoneRotationMap;
-      lastGoodMs: number | null;
-      lastOutput: ExtendedBoneRotationMap;
-      lastOutputMs: number | null;
-    },
+    state: HandDriveState,
     target: ExtendedBoneRotationMap,
     nowMs: number,
   ): ExtendedBoneRotationMap {
@@ -447,17 +573,38 @@ export class HandDriveManager {
       state.lastOutputMs = nowMs;
       return { ...target };
     }
-    const dt = Math.max((nowMs - state.lastOutputMs) / 1000, 1 / 120);
-    const tau = Math.max((this.opts.temporalSmoothingMs ?? 45) / 1000, 1e-3);
-    const baseAlpha = 1 - Math.exp(-dt / tau);
-    const maxStep = (this.opts.maxAngularVelocityDegPerSec ?? 900) * DEG * dt;
-    const deadband = (this.opts.rotationDeadbandDeg ?? 0.6) * DEG;
+    // 丢失后重获时不把整段空窗当成一个超大 dt，避免第一帧直接跳到坏姿态。
+    const dt = Math.min(Math.max((nowMs - state.lastOutputMs) / 1000, 1 / 120), 1 / 12);
     const output: ExtendedBoneRotationMap = {};
 
     for (const [bone, value] of Object.entries(target) as [
       ExtendedRigBone,
       NonNullable<ExtendedBoneRotationMap[ExtendedRigBone]>,
     ][]) {
+      const isPalm = bone === 'LeftHand' || bone === 'RightHand';
+      const tau = Math.max(
+        (
+          isPalm
+            ? this.opts.handTemporalSmoothingMs ?? 120
+            : this.opts.temporalSmoothingMs ?? 45
+        ) / 1000,
+        1e-3,
+      );
+      const baseAlpha = 1 - Math.exp(-dt / tau);
+      const maxStep =
+        (
+          isPalm
+            ? this.opts.handMaxAngularVelocityDegPerSec ?? 300
+            : this.opts.maxAngularVelocityDegPerSec ?? 900
+        ) *
+        DEG *
+        dt;
+      const deadband =
+        (
+          isPalm
+            ? this.opts.handRotationDeadbandDeg ?? 1.5
+            : this.opts.rotationDeadbandDeg ?? 0.6
+        ) * DEG;
       const previousValue = state.lastOutput[bone];
       if (!previousValue) {
         output[bone] = value;
@@ -478,7 +625,7 @@ export class HandDriveManager {
         next = previous.clone().slerp(next, maxStep / angle);
       }
       // 大动作提高响应，静态/小动作保持更强平滑。
-      const motionBoost = Math.min(0.72, angle / (35 * DEG));
+      const motionBoost = Math.min(isPalm ? 0.42 : 0.72, angle / ((isPalm ? 50 : 35) * DEG));
       const alpha = Math.min(1, baseAlpha + (1 - baseAlpha) * motionBoost);
       const smoothed = previous.slerp(next, alpha);
       output[bone] = { x: smoothed.x, y: smoothed.y, z: smoothed.z, w: smoothed.w };
