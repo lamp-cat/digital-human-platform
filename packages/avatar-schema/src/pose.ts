@@ -51,9 +51,9 @@ export const POSE_LANDMARK_NAMES = [
   'left_foot_index', 'right_foot_index',
 ] as const;
 
-/** V1 实时驱动的骨骼范围（§10.5）：骨盆、脊柱、头部、双臂、双腿。 */
+/** V1 实时驱动的骨骼范围（§10.5）：骨盆、完整躯干、头部、双臂、双腿。 */
 export const DRIVEN_BONES = [
-  'Hips', 'Spine', 'Chest', 'Neck', 'Head',
+  'Hips', 'Spine', 'Chest', 'UpperChest', 'Neck', 'Head',
   'LeftUpperArm', 'LeftLowerArm', 'RightUpperArm', 'RightLowerArm',
   'LeftUpperLeg', 'LeftLowerLeg', 'RightUpperLeg', 'RightLowerLeg',
 ] as const;

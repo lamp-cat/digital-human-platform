@@ -47,6 +47,7 @@ npm run build --workspace apps/web       # vite build
 - **摄像头隐私**：视频与关键点完全在浏览器本地处理（MediaPipe wasm 本地加载），不上传任何帧。
 - **真人视频复现**：在 `/video/:id` 独立页面导入本地视频，先跨时间轴粗扫，再围绕最清晰的完整人体帧精细标定；播放阶段以媒体时间戳同步身体和双手识别，源视频不镜像。Three.js 最终画布由 `MediaRecorder` 录成 WebM。
 - **全身蹲起**：全身模式用髋中点到支撑脚踝的垂直距离估算重心高度，Hips 根位移配合腿部绝对旋转实现脚底锁定；站姿死区、One Euro 和速度限制抑制上下抽动。仅上半身模式不写 Hips 旋转或位移。
+- **躯干转体**：肩线、髋线和髋肩竖轴组成三维身体坐标系，水平朝向按世界系绝对角驱动 Hips、Spine、Chest 与 UpperChest，支持接近 180° 的侧身/背身和肩髋分离扭转；上半身模式只驱动 Spine/Chest，不写 Hips。
 - **直播间导入**：默认加载 Kenney CC0 家具直播间；本地支持 GLB、嵌入式 glTF、FBX 和 OBJ，模型完成解析与边界检查后才替换当前房间。
 - **骨架动作抗抖**：导入人物的动画按 StandardRig 父链世界旋转增量和模型绑定姿态重定向；坐下/站起共用严格互逆关键帧，单次播放保持末帧，动作切换使用 0.35 秒交叉淡化。
 - **面部表情追踪**：Face Landmarker（单脸 478 点 + 52 blendshape）→ 中性脸中位数标定 → 偏置/死区消除 → One Euro 平滑 → VRM 1.0 Expression、VRM 0.x BlendShapeGroup 或普通 GLB Morph。面部丢失后先短暂保持，再平滑回中性。
