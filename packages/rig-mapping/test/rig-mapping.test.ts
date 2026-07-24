@@ -195,18 +195,24 @@ describe('TrackingLossManager', () => {
 });
 
 describe('上半身模式（trackingMode: upper）', () => {
-  it('upper 模式不输出腿部骨骼旋转，手臂/脊柱/头部正常输出', () => {
+  it('upper 模式不输出髋关节和腿部旋转，手臂/脊柱/头部正常输出', () => {
     const calibration = calibrate([makeFrame(T_POSE), makeFrame(T_POSE)]);
-    const rotations = mapPoseFrameToBoneRotations(makeFrame(T_POSE), calibration, {
+    const turnedHips = makeFrame({
+      ...T_POSE,
+      left_hip: [0.62, 0.49],
+      right_hip: [0.43, 0.55],
+    });
+    const rotations = mapPoseFrameToBoneRotations(turnedHips, calibration, {
       trackingMode: 'upper',
     });
-    // 腿部即使关键点全可见也不驱动
+    // 髋关节和腿部即使关键点全可见、髋线明显倾斜也不驱动
+    expect(rotations.Hips).toBeUndefined();
     expect(rotations.LeftUpperLeg).toBeUndefined();
     expect(rotations.LeftLowerLeg).toBeUndefined();
     expect(rotations.RightUpperLeg).toBeUndefined();
     expect(rotations.RightLowerLeg).toBeUndefined();
     // 上半身骨骼正常
-    for (const bone of ['LeftUpperArm', 'RightUpperArm', 'Spine', 'Hips', 'Head'] as const) {
+    for (const bone of ['LeftUpperArm', 'RightUpperArm', 'Spine', 'Chest', 'Head'] as const) {
       expect(rotations[bone], bone).toBeDefined();
     }
   });

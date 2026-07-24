@@ -18,7 +18,7 @@ export interface MapPoseOptions {
   maxHipsTurnDeg?: number;
   /** 头部最大偏转角（度），默认 45。 */
   maxHeadTurnDeg?: number;
-  /** 追踪模式：upper 时跳过腿部骨骼（双腿不被驱动，保持当前动画/绑定姿态），默认 full */
+  /** 追踪模式：upper 时不驱动髋关节和双腿，保持当前动画/绑定姿态；默认 full。 */
   trackingMode?: PoseTrackingMode;
 }
 
@@ -99,7 +99,7 @@ export function mapPoseFrameToBoneRotations(
   const maxSpineBend = (opts.maxSpineBendDeg ?? 30) * DEG;
   const maxHipsTurn = (opts.maxHipsTurnDeg ?? 60) * DEG;
   const maxHeadTurn = (opts.maxHeadTurnDeg ?? 45) * DEG;
-  const skipLegs = opts.trackingMode === 'upper';
+  const upperBodyOnly = opts.trackingMode === 'upper';
 
   const lmMap = new Map(frame.landmarks.map((lm) => [lm.name, lm]));
   const point = (name: string): Vector3 | null => {
@@ -133,7 +133,7 @@ export function mapPoseFrameToBoneRotations(
 
   // 四肢：绝对方向对齐，不限角（膝盖反向由方向向量自然表达）
   for (const [segment, [from, to]] of Object.entries(SEGMENT_ENDPOINTS)) {
-    if (skipLegs && LEG_SEGMENTS.has(segment)) continue; // 上半身模式：双腿不驱动
+    if (upperBodyOnly && LEG_SEGMENTS.has(segment)) continue; // 上半身模式：双腿不驱动
     const a = point(from);
     const b = point(to);
     if (!a || !b) continue; // 可见性不足 → 不输出该骨骼
@@ -149,13 +149,15 @@ export function mapPoseFrameToBoneRotations(
   emitDelta('spine', 'Spine', spineCurrent ? spineCurrent.clone() : null, maxSpineBend, 0.5);
   emitDelta('spine', 'Chest', spineCurrent ? spineCurrent.clone() : null, maxSpineBend, 0.5);
 
-  // 骨盆：髋线朝向（右髋 → 左髋），worldLandmarks 的 z 使体转（yaw）可测，限幅 60°
-  const hipsCurrent = (() => {
-    const r = point('right_hip');
-    const l = point('left_hip');
-    return r && l ? l.sub(r) : null;
-  })();
-  emitDelta('hips', 'Hips', hipsCurrent, maxHipsTurn);
+  // 骨盆仅属于全身控制：上半身模式不写入 Hips，避免髋线噪声带动整个人物。
+  if (!upperBodyOnly) {
+    const hipsCurrent = (() => {
+      const r = point('right_hip');
+      const l = point('left_hip');
+      return r && l ? l.sub(r) : null;
+    })();
+    emitDelta('hips', 'Hips', hipsCurrent, maxHipsTurn);
+  }
 
   // 头部：肩中点 → 鼻，限最大偏转角
   const headCurrent = (() => {
