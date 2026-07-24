@@ -19,8 +19,14 @@ import {
 } from '../src/imported.js';
 import { AvatarPackage } from '../src/avatar-package.js';
 
-const SAMPLE_A_URL = new URL('../../../assets/base-avatars/samples/AvatarSample_A.vrm', import.meta.url);
-const SEED_SAN_URL = new URL('../../../assets/base-avatars/samples/Seed-san.vrm', import.meta.url);
+const SAMPLE_A_URL = new URL(
+  '../../../apps/web/public/open-avatars/models/avatar-sample-a.vrm',
+  import.meta.url,
+);
+const SEED_SAN_URL = new URL(
+  '../../../apps/web/public/open-avatars/models/seed-san.vrm',
+  import.meta.url,
+);
 
 function readFile(url: URL): ArrayBuffer {
   const buf = readFileSync(url);

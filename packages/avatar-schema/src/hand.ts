@@ -103,3 +103,16 @@ export const VRM_FINGER_TO_RIG: Record<string, FingerBone> = {
   rightLittleIntermediate: 'RightLittleIntermediate',
   rightLittleDistal: 'RightLittleDistal',
 };
+
+/**
+ * VRM 1.0 把拇指三节命名为 Metacarpal / Proximal / Distal；
+ * VRM 0.x 则使用 Proximal / Intermediate / Distal。分版本映射可防止
+ * 拇指少一节或把近节驱动写到错误节点。
+ */
+export const VRM1_FINGER_TO_RIG: Record<string, FingerBone> = {
+  ...VRM_FINGER_TO_RIG,
+  leftThumbMetacarpal: 'LeftThumbProximal',
+  leftThumbProximal: 'LeftThumbIntermediate',
+  rightThumbMetacarpal: 'RightThumbProximal',
+  rightThumbProximal: 'RightThumbIntermediate',
+};

@@ -185,13 +185,17 @@ export class AvatarPackage {
   /** 换装事务：先 checkWearable 校验，再预构建，最后提交；失败不动场景。 */
   wearTrait(manifest: GarmentManifest): WearResult {
     const source = this.profile.assetSource;
+    const externalCompatibility =
+      source.type === 'imported' || source.type === 'catalog'
+        ? source.compatibility
+        : null;
     const result = checkWearable(manifest, {
       baseAvatarId: this.profile.baseAvatarId,
       boneScales: this.profile.boneScales,
       currentTraits: this.profile.traits,
       knownGarments: this.knownGarments,
       importCompatibleGarments: source.type === 'imported' ? this.importCompatibleGarments : null,
-      importedCompatibility: source.type === 'imported' ? source.compatibility : null,
+      importedCompatibility: externalCompatibility,
     });
     if (!result.success) return result;
 

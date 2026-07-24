@@ -14,6 +14,7 @@ from ..deps import get_current_user, get_db
 from ..errors import ApiError
 from ..jobs import create_job
 from ..models import Avatar, AvatarVersion, User
+from ..open_avatar_catalog import get_open_avatar, list_open_avatars
 from ..schemas import create_default_profile, validate_profile
 from ..serializers import avatar_detail, avatar_summary
 
@@ -26,6 +27,7 @@ _JPEG_MAGIC = b"\xff\xd8\xff"
 
 class CreateAvatarBody(BaseModel):
     name: str = Field(min_length=1, max_length=64)
+    catalogAssetId: str | None = None
 
 
 class PatchAvatarBody(BaseModel):
@@ -59,11 +61,24 @@ def create_avatar(
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
+    profile = create_default_profile()
+    base_avatar_id = "base-adult-v1"
+    if body.catalogAssetId is not None:
+        catalog_asset = get_open_avatar(body.catalogAssetId)
+        if catalog_asset is None:
+            raise ApiError(404, "CATALOG_AVATAR_NOT_FOUND", "开源人物不存在")
+        base_avatar_id = f"catalog-{catalog_asset['id']}"
+        profile = create_default_profile(base_avatar_id=base_avatar_id)
+        profile["assetSource"] = {
+            "type": "catalog",
+            "assetId": catalog_asset["id"],
+            "compatibility": catalog_asset["compatibility"],
+        }
     avatar = Avatar(
         owner_id=user.id,
         name=body.name,
-        base_avatar_id="base-adult-v1",
-        profile_json=create_default_profile(),
+        base_avatar_id=base_avatar_id,
+        profile_json=profile,
         version=1,
     )
     db.add(avatar)
@@ -72,6 +87,11 @@ def create_avatar(
     db.commit()
     db.refresh(avatar)
     return {"avatar": avatar_detail(avatar)}
+
+
+@router.get("/catalog")
+def list_avatar_catalog(user: User = Depends(get_current_user)):
+    return {"avatars": list_open_avatars()}
 
 
 @router.get("")
@@ -112,6 +132,17 @@ def patch_avatar(
     profile_json, errors = validate_profile(body.profile)
     if profile_json is None:
         raise ApiError(422, "AVATAR_PROFILE_INVALID", "Profile 校验失败", {"errors": errors})
+    source = profile_json.get("assetSource", {})
+    if source.get("type") == "catalog":
+        catalog_asset = get_open_avatar(source.get("assetId", ""))
+        expected_base_id = f"catalog-{source.get('assetId', '')}"
+        if catalog_asset is None or profile_json.get("baseAvatarId") != expected_base_id:
+            raise ApiError(
+                422,
+                "AVATAR_PROFILE_INVALID",
+                "开源人物来源与底模不匹配",
+                {"errors": ["assetSource.assetId: unknown or mismatched catalog asset"]},
+            )
     avatar.profile_json = profile_json
     avatar.base_avatar_id = profile_json["baseAvatarId"]
     if body.name is not None:

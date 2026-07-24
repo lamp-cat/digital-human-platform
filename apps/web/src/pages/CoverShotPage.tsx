@@ -138,6 +138,12 @@ export function CoverShotPage() {
           const modelUrl = importRecord.modelUrl ?? `/api/v1/imports/${importRecord.id}/model`;
           const objectUrl = await fetchAuthedObjectUrl(modelUrl);
           imported = await loadImportedAvatar(objectUrl);
+        } else if (avatar.assetSource.type === 'catalog') {
+          if (!avatar.modelUrl) throw new Error('开源人物模型地址缺失');
+          setStatus('正在加载开源人物…');
+          importCompatibleGarments = [];
+          const objectUrl = await fetchAuthedObjectUrl(avatar.modelUrl);
+          imported = await loadImportedAvatar(objectUrl);
         }
 
         pkg = new AvatarPackage({

@@ -249,6 +249,20 @@ describe('AvatarPackage 换装事务', () => {
     if (!result.success) expect(result.reasonCode).toBe('IMPORTED_AVATAR_RESTRICTED');
     pkg.dispose();
   });
+
+  it('开源目录人物固定使用自带外观，不允许套用通用衣物', () => {
+    const profile = createDefaultProfile('catalog-chibi-dog');
+    profile.assetSource = {
+      type: 'catalog',
+      assetId: 'chibi-dog',
+      compatibility: 'POSE_ONLY',
+    };
+    const pkg = new AvatarPackage({ profile, knownGarments: makeCatalog() });
+    const result = pkg.wearTrait(HOODIE);
+    expect(result.success).toBe(false);
+    if (!result.success) expect(result.reasonCode).toBe('IMPORTED_AVATAR_RESTRICTED');
+    pkg.dispose();
+  });
 });
 
 describe('AvatarPackage 全身根运动', () => {

@@ -102,13 +102,8 @@ export function AvatarsPage() {
     void load();
   }, [load]);
 
-  const createNew = async () => {
-    try {
-      const { avatar } = await api.createAvatar('我的数字人');
-      navigate(`/editor/${avatar.id}`);
-    } catch (err) {
-      toast(err instanceof ApiError ? err.message : '创建失败', 'error');
-    }
+  const createNew = () => {
+    navigate(workspace ? `/create?workspace=${workspace}` : '/create');
   };
 
   const duplicate = async (id: string) => {

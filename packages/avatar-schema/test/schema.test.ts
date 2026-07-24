@@ -52,6 +52,20 @@ describe('AvatarProfile', () => {
     const r = validateProfile(p);
     expect(r.success).toBe(false);
   });
+
+  it('接受经过目录校验的开源人物来源', () => {
+    const p = {
+      ...createDefaultProfile('catalog-chibi-dog'),
+      assetSource: {
+        type: 'catalog' as const,
+        assetId: 'chibi-dog',
+        compatibility: 'POSE_ONLY' as const,
+      },
+    };
+    const r = validateProfile(p);
+    expect(r.success).toBe(true);
+    if (r.success) expect(r.profile.assetSource.type).toBe('catalog');
+  });
 });
 
 describe('换装事务', () => {
