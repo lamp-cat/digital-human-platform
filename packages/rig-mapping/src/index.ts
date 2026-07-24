@@ -7,3 +7,4 @@ export * from './root-motion.js';
 export * from './pose-completer.js';
 export * from './hand-mapper.js';
 export * from './face-mapper.js';
+export * from './pose-collision.js';

@@ -50,12 +50,11 @@ import {
   type StudioCameraPose,
 } from '../three/AvatarSceneController';
 import {
-  CanvasVideoRecorder,
-  getSupportedVideoMimeType,
-  isVideoExportFormatSupported,
-  videoFormatFromMimeType,
+  exportOfflineDanceVideo,
+  isOfflineVideoExportAvailable,
+  type OfflineExportPhase,
   type VideoExportFormat,
-} from '../video/CanvasVideoRecorder';
+} from '../video/OfflineDanceVideoExporter';
 
 type DriveState = 'idle' | 'starting' | 'calibrating' | 'driving' | 'denied';
 
@@ -93,6 +92,15 @@ interface DanceRecognitionMetrics {
   coverage80: number;
   trackingCoverage: number;
   inferredPerFrame: number;
+  handCoverage?: number;
+  collisionCorrections?: number;
+}
+
+interface DanceExportSummary {
+  sourceDurationSec: number;
+  encodedDurationSec: number;
+  frameCount: number;
+  audioIncluded: boolean;
 }
 
 const DEFAULT_PLACEMENT: AvatarPlacement = {
@@ -127,7 +135,7 @@ function buildDanceOutputName(sourceName: string, format: VideoExportFormat): st
 }
 
 function defaultVideoExportFormat(): VideoExportFormat {
-  return isVideoExportFormatSupported('mp4') ? 'mp4' : 'webm';
+  return 'mp4';
 }
 
 /** 兼容片头/空镜：先覆盖整段粗扫，再围绕最清晰的全身帧做精细标定。 */
@@ -223,8 +231,9 @@ export function MotionPage({ workspace = 'studio' }: { workspace?: 'studio' | 'v
   const danceOutputUrlRef = useRef<string | null>(null);
   const danceTrackerRef = useRef<VideoFilePoseTracker | null>(null);
   const danceHandTrackerRef = useRef<HandTracker | null>(null);
-  const danceRecorderRef = useRef<CanvasVideoRecorder | null>(null);
+  const danceExportAbortRef = useRef<AbortController | null>(null);
   const danceCalibrationRef = useRef<CalibrationData | null>(null);
+  const danceStandingHipHeightRef = useRef<number | null>(null);
   const danceCrouchMotionRef = useRef(new CrouchMotionTracker());
   const danceStateRef = useRef<DanceState>('empty');
   const danceFinishingRef = useRef(false);
@@ -300,8 +309,12 @@ export function MotionPage({ workspace = 'studio' }: { workspace?: 'studio' | 'v
   const [danceOutputName, setDanceOutputName] = useState(() =>
     buildDanceOutputName('digital-human-dance', defaultVideoExportFormat()),
   );
-  const mp4ExportSupported = isVideoExportFormatSupported('mp4');
-  const webmExportSupported = isVideoExportFormatSupported('webm');
+  const [danceExportPhase, setDanceExportPhase] =
+    useState<OfflineExportPhase>('preparing');
+  const [danceExportSummary, setDanceExportSummary] =
+    useState<DanceExportSummary | null>(null);
+  const mp4ExportSupported = isOfflineVideoExportAvailable();
+  const webmExportSupported = isOfflineVideoExportAvailable();
 
   const setDanceState = (state: DanceState) => {
     danceStateRef.current = state;
@@ -811,8 +824,8 @@ export function MotionPage({ workspace = 'studio' }: { workspace?: 'studio' | 'v
       danceTrackerRef.current = null;
       danceHandTrackerRef.current?.stop();
       danceHandTrackerRef.current = null;
-      danceRecorderRef.current?.cancel();
-      danceRecorderRef.current = null;
+      danceExportAbortRef.current?.abort();
+      danceExportAbortRef.current = null;
       if (danceSourceUrlRef.current) URL.revokeObjectURL(danceSourceUrlRef.current);
       if (danceOutputUrlRef.current) URL.revokeObjectURL(danceOutputUrlRef.current);
     };
@@ -995,8 +1008,8 @@ export function MotionPage({ workspace = 'studio' }: { workspace?: 'studio' | 'v
     danceFinishingRef.current = false;
     danceVideoRef.current?.pause();
     stopDanceModels();
-    danceRecorderRef.current?.cancel();
-    danceRecorderRef.current = null;
+    danceExportAbortRef.current?.abort();
+    danceExportAbortRef.current = null;
     danceCompleterRef.current.reset();
     danceConfidenceStatsRef.current = {
       frames: 0,
@@ -1015,6 +1028,8 @@ export function MotionPage({ workspace = 'studio' }: { workspace?: 'studio' | 'v
     controllerRef.current?.pkg?.applyHipsOffsetY(0);
     latestDancePoseRef.current = null;
     setDanceProgress(0);
+    setDanceExportPhase('preparing');
+    setDanceExportSummary(null);
     setDanceTrackingStatus('tracking');
     setDanceHandPresence('none');
     setDanceRecognitionMetrics(null);
@@ -1043,34 +1058,8 @@ export function MotionPage({ workspace = 'studio' }: { workspace?: 'studio' | 'v
       });
     }
 
-    try {
-      if (state === 'recording' && danceRecorderRef.current) {
-        const recorder = danceRecorderRef.current;
-        danceRecorderRef.current = null;
-        const blob = await recorder.stop();
-        if (blob.size === 0) throw new Error('导出文件为空，请重新录制');
-        clearDanceOutput();
-        const actualFormat = videoFormatFromMimeType(blob.type, danceExportFormat);
-        const outputName = buildDanceOutputName(
-          danceInfo?.name ?? 'digital-human-dance',
-          actualFormat,
-        );
-        const outputUrl = URL.createObjectURL(blob);
-        danceOutputUrlRef.current = outputUrl;
-        setDanceOutputUrl(outputUrl);
-        setDanceOutputName(outputName);
-        const anchor = document.createElement('a');
-        anchor.href = outputUrl;
-        anchor.download = outputName;
-        anchor.click();
-      }
-      setDanceState('completed');
-    } catch (error) {
-      setDanceError(error instanceof Error ? error.message : '数字人视频导出失败');
-      setDanceState('error');
-    } finally {
-      danceFinishingRef.current = false;
-    }
+    setDanceState('completed');
+    danceFinishingRef.current = false;
   };
 
   const analyzeDanceVideo = async (
@@ -1130,12 +1119,12 @@ export function MotionPage({ workspace = 'studio' }: { workspace?: 'studio' | 'v
         visibilityThreshold: 0.45,
       });
       danceCalibrationRef.current = calibration;
-      danceCrouchMotionRef.current.setBaseline(
-        estimateStandingHipHeight([
-          ...scanFrames.map((candidate) => candidate.frame),
-          ...calibrationFrames,
-        ]),
-      );
+      const standingHipHeight = estimateStandingHipHeight([
+        ...scanFrames.map((candidate) => candidate.frame),
+        ...calibrationFrames,
+      ]);
+      danceStandingHipHeightRef.current = standingHipHeight;
+      danceCrouchMotionRef.current.setBaseline(standingHipHeight);
       setDanceCalibrationConfidence(calibration.meanConfidence);
     } finally {
       tracker.stop();
@@ -1152,12 +1141,8 @@ export function MotionPage({ workspace = 'studio' }: { workspace?: 'studio' | 'v
       setDanceError('请先停止摄像头驱动，再复现真人视频');
       return;
     }
-    if (mode === 'record' && !getSupportedVideoMimeType(danceExportFormat)) {
-      setDanceError(
-        danceExportFormat === 'mp4'
-          ? '当前浏览器不支持 MP4 录制，请选择 WebM 兼容格式'
-          : '当前浏览器不支持 WebM 录制，请选择 MP4 格式',
-      );
+    if (mode === 'record' && !isOfflineVideoExportAvailable()) {
+      setDanceError('当前浏览器不支持 WebCodecs 独立渲染，请升级最新版 Chrome 或 Edge');
       setDanceState('error');
       return;
     }
@@ -1170,6 +1155,7 @@ export function MotionPage({ workspace = 'studio' }: { workspace?: 'studio' | 'v
     setDanceTrackingStatus('tracking');
     setDanceHandPresence('none');
     clearDanceOutput();
+    setDanceExportSummary(null);
 
     try {
       await analyzeDanceVideo(video, runToken);
@@ -1209,6 +1195,72 @@ export function MotionPage({ workspace = 'studio' }: { workspace?: 'studio' | 'v
       danceCrouchMotionRef.current.reset();
       controller.pkg.applyHipsOffsetY(0);
       latestDancePoseRef.current = null;
+
+      if (mode === 'record') {
+        const calibration = danceCalibrationRef.current;
+        if (!calibration) throw new Error('视频姿态标定尚未完成');
+        const abortController = new AbortController();
+        danceExportAbortRef.current = abortController;
+        setDanceExportPhase('preparing');
+        setDanceExportSummary(null);
+        setDanceState('recording');
+        const result = await exportOfflineDanceVideo({
+          file,
+          sourceDurationSec: danceInfo.durationSec,
+          format: danceExportFormat,
+          quality: danceQuality,
+          calibration,
+          standingHipHeight: danceStandingHipHeightRef.current,
+          rigBones: rigBonesRef.current,
+          controller,
+          width: 1280,
+          height: 720,
+          fps: 30,
+          signal: abortController.signal,
+          onProgress: (progress) => {
+            if (runToken !== danceRunTokenRef.current) return;
+            setDanceExportPhase(progress.phase);
+            setDanceProgress(progress.progress);
+          },
+        });
+        if (runToken !== danceRunTokenRef.current) return;
+        danceExportAbortRef.current = null;
+        setDanceRecognitionMetrics({
+          frames: result.metrics.frames,
+          rawConfidence: result.metrics.rawConfidence,
+          effectiveConfidence: result.metrics.effectiveConfidence,
+          coverage80: result.metrics.coverage80,
+          trackingCoverage:
+            result.metrics.activeFrames / Math.max(1, result.metrics.frames),
+          inferredPerFrame: result.metrics.inferredPerFrame,
+          handCoverage: result.metrics.handCoverage,
+          collisionCorrections: result.metrics.collisionCorrections,
+        });
+        setDanceTrackingStatus(result.metrics.trackingStatus);
+        setDanceHandPresence(result.metrics.handCoverage > 0 ? 'both' : 'none');
+        setDanceExportSummary({
+          sourceDurationSec: result.sourceDurationSec,
+          encodedDurationSec: result.encodedDurationSec,
+          frameCount: result.frameCount,
+          audioIncluded: result.audioIncluded,
+        });
+        clearDanceOutput();
+        const outputName = buildDanceOutputName(
+          danceInfo.name,
+          danceExportFormat,
+        );
+        const outputUrl = URL.createObjectURL(result.blob);
+        danceOutputUrlRef.current = outputUrl;
+        setDanceOutputUrl(outputUrl);
+        setDanceOutputName(outputName);
+        const anchor = document.createElement('a');
+        anchor.href = outputUrl;
+        anchor.download = outputName;
+        anchor.click();
+        setDanceProgress(1);
+        setDanceState('completed');
+        return;
+      }
 
       const poseTracker = new VideoFilePoseTracker({
         wasmBasePath: '/mediapipe/wasm',
@@ -1251,32 +1303,20 @@ export function MotionPage({ workspace = 'studio' }: { workspace?: 'studio' | 'v
         return;
       }
 
-      if (mode === 'record') {
-        const renderSize = controller.getRenderSize();
-        if (renderSize.width === 0 || renderSize.height === 0) {
-          throw new Error('直播间画布尚未就绪');
-        }
-        const recorder = new CanvasVideoRecorder();
-        recorder.start(controller.getRenderCanvas(), {
-          fps: 30,
-          videoBitsPerSecond: 8_000_000,
-          audioBitsPerSecond: 192_000,
-          sourceVideo: video,
-          format: danceExportFormat,
-        });
-        danceRecorderRef.current = recorder;
-        setDanceState('recording');
-      } else {
-        setDanceState('previewing');
-      }
-
+      setDanceState('previewing');
       await poseTracker.start(handleDanceFrame);
     } catch (error) {
       if (runToken !== danceRunTokenRef.current) return;
       stopDanceModels();
-      danceRecorderRef.current?.cancel();
-      danceRecorderRef.current = null;
-      setDanceError(error instanceof Error ? error.message : '真人视频分析失败');
+      danceExportAbortRef.current?.abort();
+      danceExportAbortRef.current = null;
+      setDanceError(
+        error instanceof DOMException && error.name === 'AbortError'
+          ? '精细渲染已取消'
+          : error instanceof Error
+            ? error.message
+            : '真人视频分析失败',
+      );
       setDanceState('error');
     }
   };
@@ -1305,8 +1345,11 @@ export function MotionPage({ workspace = 'studio' }: { workspace?: 'studio' | 'v
     }
     clearDanceOutput();
     danceCalibrationRef.current = null;
+    danceStandingHipHeightRef.current = null;
     danceCrouchMotionRef.current.setBaseline(null);
     setDanceCalibrationConfidence(null);
+    setDanceExportSummary(null);
+    setDanceExportPhase('preparing');
     setDanceInfo(null);
     setDanceError('');
     setDanceState('loading');
@@ -1426,7 +1469,7 @@ export function MotionPage({ workspace = 'studio' }: { workspace?: 'studio' | 'v
                 <span
                   className={`studio-live-dot ${danceState === 'recording' ? 'recording' : ''}`}
                 />
-                {danceState === 'recording' ? 'REC' : 'PREVIEW'}
+                {danceState === 'recording' ? 'OFFLINE RENDER' : 'PREVIEW'}
                 <span className="studio-camera-name">{activeCameraLabel}</span>
               </div>
               <video
@@ -1854,6 +1897,7 @@ export function MotionPage({ workspace = 'studio' }: { workspace?: 'studio' | 'v
                 onClick={() => {
                   setDanceQuality('accurate');
                   danceCalibrationRef.current = null;
+                  danceStandingHipHeightRef.current = null;
                   setDanceCalibrationConfidence(null);
                 }}
               >
@@ -1865,6 +1909,7 @@ export function MotionPage({ workspace = 'studio' }: { workspace?: 'studio' | 'v
                 onClick={() => {
                   setDanceQuality('smooth');
                   danceCalibrationRef.current = null;
+                  danceStandingHipHeightRef.current = null;
                   setDanceCalibrationConfidence(null);
                 }}
               >
@@ -1884,7 +1929,13 @@ export function MotionPage({ workspace = 'studio' }: { workspace?: 'studio' | 'v
                     {danceState === 'analyzing'
                       ? '正在扫描清晰全身片段并自动标定…'
                       : danceState === 'recording'
-                        ? '正在录制数字人视频'
+                        ? danceExportPhase === 'preparing'
+                          ? '正在加载逐帧识别与独立渲染引擎…'
+                          : danceExportPhase === 'tracking'
+                            ? '正在逐帧识别、碰撞约束并精细渲染…'
+                            : danceExportPhase === 'audio'
+                              ? '正在按原时间轴复用音轨…'
+                              : '正在封装并校验成片时长…'
                         : danceState === 'previewing'
                           ? '正在预览复现'
                           : '处理完成'}
@@ -1944,7 +1995,19 @@ export function MotionPage({ workspace = 'studio' }: { workspace?: 'studio' | 'v
                 </Badge>{' '}
                 <Badge kind="info">
                   时序推理 {danceRecognitionMetrics.inferredPerFrame.toFixed(1)} 点/帧
-                </Badge>
+                </Badge>{' '}
+                {danceRecognitionMetrics.handCoverage !== undefined && (
+                  <>
+                    <Badge
+                      kind={danceRecognitionMetrics.handCoverage >= 0.6 ? 'success' : 'warning'}
+                    >
+                      手部细节覆盖 {(danceRecognitionMetrics.handCoverage * 100).toFixed(0)}%
+                    </Badge>{' '}
+                    <Badge kind="info">
+                      防穿模纠正 {danceRecognitionMetrics.collisionCorrections ?? 0} 次
+                    </Badge>
+                  </>
+                )}
                 <span className="dance-confidence-detail">
                   MediaPipe 原始均值{' '}
                   {(danceRecognitionMetrics.rawConfidence * 100).toFixed(0)}%，
@@ -1959,6 +2022,28 @@ export function MotionPage({ workspace = 'studio' }: { workspace?: 'studio' | 'v
               <p>
                 <Badge kind="success">
                   {danceOutputUrl ? '导出完成，已开始下载' : '预览完成'}
+                </Badge>
+              </p>
+            )}
+            {danceExportSummary && (
+              <p className="dance-confidence-row">
+                <Badge
+                  kind={
+                    Math.abs(
+                      danceExportSummary.encodedDurationSec -
+                        danceExportSummary.sourceDurationSec,
+                    ) <= 1 / 30
+                      ? 'success'
+                      : 'warning'
+                  }
+                >
+                  等时长 {danceExportSummary.encodedDurationSec.toFixed(3)}s
+                </Badge>{' '}
+                <Badge kind="info">{danceExportSummary.frameCount} 帧独立渲染</Badge>{' '}
+                <Badge kind={danceExportSummary.audioIncluded ? 'success' : 'info'}>
+                  {danceExportSummary.audioIncluded
+                    ? '已无损保留原声'
+                    : '源音轨未兼容复用'}
                 </Badge>
               </p>
             )}
@@ -1989,9 +2074,9 @@ export function MotionPage({ workspace = 'studio' }: { workspace?: 'studio' | 'v
             </div>
             <p className="muted dance-format-help">
               {mp4ExportSupported
-                ? 'MP4 使用 H.264 编码，适合直接发送、剪辑和在常见播放器中播放。'
-                : '当前浏览器不能原生录制 MP4，请使用 WebM，或升级 Chrome、Edge、Safari。'}
-              {' '}浏览器允许捕获源音轨时会保留原声。
+                ? 'MP4 使用 WebCodecs H.264 逐帧编码，适合直接发送、剪辑和在常见播放器中播放。'
+                : '当前浏览器不支持 WebCodecs 独立渲染，请升级最新版 Chrome 或 Edge。'}
+              {' '}导出按源媒体时间轴复用音轨，并在完成后自动校验时长。
             </p>
 
             <div className="mode-select studio-actions dance-actions">
@@ -2028,8 +2113,9 @@ export function MotionPage({ workspace = 'studio' }: { workspace?: 'studio' | 'v
               )}
             </div>
             <p className="muted">
-              导出内容是左侧当前画面；可在开始前用鼠标旋转、平移或缩放调整构图。
-              导出容器与文件扩展名严格一致，不会用修改后缀伪装格式。
+              导出使用隐藏的 1280×720 独立 WebGL 画布逐帧精细渲染，不录制左侧预览、
+              不受页面掉帧影响；机位沿用开始导出时的当前构图。每帧均应用双手 21 点、
+              骨长与关节限位、躯干碰撞体和分级抗抖，减少手穿胸腹、反折与抽搐。
             </p>
             <p className="muted">
               建议使用固定机位、均匀光照、头手脚完整入镜且遮挡较少的正面或 45° 舞蹈视频。

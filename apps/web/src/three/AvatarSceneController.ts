@@ -43,6 +43,14 @@ export interface StudioCameraPreset {
   fov: number;
 }
 
+export interface OfflineRenderSession {
+  /** 与页面预览画布完全分离的编码画布。 */
+  canvas: HTMLCanvasElement;
+  /** 在当前骨骼状态下渲染一帧，不依赖 requestAnimationFrame。 */
+  renderFrame(): void;
+  dispose(): void;
+}
+
 export const STUDIO_CAMERA_PRESETS: readonly StudioCameraPreset[] = [
   { id: 'front', label: '正面中景', offset: [0.45, 1.45, 3.25], targetOffset: [0, 1.05, 0], fov: 38 },
   { id: 'close', label: '面部近景', offset: [0.18, 1.58, 1.65], targetOffset: [0, 1.43, 0], fov: 32 },
@@ -73,6 +81,7 @@ export class AvatarSceneController {
   private rafId = 0;
   private resizeObserver: ResizeObserver | null = null;
   private cameraTransition: CameraTransition | null = null;
+  private offlineSessionActive = false;
   private placement: AvatarPlacement = {
     x: 0,
     y: 0,
@@ -122,7 +131,7 @@ export class AvatarSceneController {
   private loop = (): void => {
     this.rafId = requestAnimationFrame(this.loop);
     const dt = Math.min(this.clock.getDelta(), 0.1);
-    this.pkg?.update(dt);
+    if (!this.offlineSessionActive) this.pkg?.update(dt);
     this.updateCameraTransition(performance.now());
     this.controls.update();
     this.renderer.render(this.scene, this.camera);
@@ -176,14 +185,59 @@ export class AvatarSceneController {
     return snapshotCanvas(this.renderer, this.scene, this.camera);
   }
 
-  /** 当前直播间渲染画布，供浏览器本地录制数字人视频。 */
-  getRenderCanvas(): HTMLCanvasElement {
-    return this.renderer.domElement;
-  }
+  /**
+   * 创建离线导出专用 WebGLRenderer。
+   *
+   * 该画布不挂载到 DOM，也不使用页面渲染循环；调用方按媒体时间逐帧设置
+   * 骨骼并显式 renderFrame，因此页面掉帧不会进入成片。
+   */
+  createOfflineRenderSession(
+    width = 1280,
+    height = 720,
+  ): OfflineRenderSession {
+    if (this.offlineSessionActive) throw new Error('精细渲染任务已在运行');
+    if (!this.pkg) throw new Error('数字人尚未加载');
+    const safeWidth = Math.max(320, Math.round(width));
+    const safeHeight = Math.max(180, Math.round(height));
+    const renderer = new WebGLRenderer({
+      antialias: true,
+      alpha: false,
+      preserveDrawingBuffer: false,
+      powerPreference: 'high-performance',
+    });
+    renderer.setPixelRatio(1);
+    renderer.setSize(safeWidth, safeHeight, false);
+    renderer.shadowMap.enabled = true;
+    renderer.shadowMap.type = this.renderer.shadowMap.type;
+    renderer.outputColorSpace = this.renderer.outputColorSpace;
+    renderer.toneMapping = this.renderer.toneMapping;
+    renderer.toneMappingExposure = this.renderer.toneMappingExposure;
 
-  getRenderSize(): { width: number; height: number } {
-    const canvas = this.renderer.domElement;
-    return { width: canvas.width, height: canvas.height };
+    const camera = this.camera.clone();
+    camera.aspect = safeWidth / safeHeight;
+    camera.updateProjectionMatrix();
+    camera.updateMatrixWorld(true);
+    this.offlineSessionActive = true;
+    let disposed = false;
+
+    return {
+      canvas: renderer.domElement,
+      renderFrame: () => {
+        if (disposed) throw new Error('精细渲染会话已结束');
+        this.pkg?.root.updateMatrixWorld(true);
+        this.scene.updateMatrixWorld(true);
+        renderer.render(this.scene, camera);
+      },
+      dispose: () => {
+        if (disposed) return;
+        disposed = true;
+        renderer.dispose();
+        renderer.domElement.width = 1;
+        renderer.domElement.height = 1;
+        this.offlineSessionActive = false;
+        this.clock.getDelta();
+      },
+    };
   }
 
   /** 加载随项目发布的 Kenney CC0 直播间。 */
