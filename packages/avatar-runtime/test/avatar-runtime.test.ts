@@ -251,6 +251,22 @@ describe('AvatarPackage 换装事务', () => {
   });
 });
 
+describe('AvatarPackage 全身根运动', () => {
+  it('下蹲位移写入 Hips，切回预置动作时立即恢复绑定高度', () => {
+    const pkg = new AvatarPackage({
+      profile: createDefaultProfile(),
+      knownGarments: new Map(),
+    });
+    const hips = pkg.getDriver().bones.get('Hips')!;
+    const bindY = hips.position.y;
+    pkg.applyHipsOffsetY(-0.4);
+    expect(hips.position.y).toBeCloseTo(bindY - 0.4, 4);
+    pkg.playAnimation('idle-01');
+    expect(hips.position.y).toBeCloseTo(bindY, 4);
+    pkg.dispose();
+  });
+});
+
 describe('程序化衣物', () => {
   it('12 件内置衣物均可构建并刚性绑定到骨架', () => {
     const avatar = createBaseAvatar();

@@ -27,6 +27,8 @@ export interface VideoFilePoseTrackerOptions {
   video: HTMLVideoElement;
   /** 追踪模式，默认 full */
   trackingMode?: PoseTrackingMode;
+  /** 推理异常回调。 */
+  onError?: (err: Error) => void;
 }
 
 export class VideoFilePoseTracker {
@@ -36,6 +38,8 @@ export class VideoFilePoseTracker {
   private running = false;
   private lastInferMs = 0;
   private lastVideoTime = -1;
+  private lastDetectorTimestampMs = -1;
+  private disposed = false;
 
   constructor(opts: VideoFilePoseTrackerOptions) {
     this.opts = opts;
@@ -43,6 +47,7 @@ export class VideoFilePoseTracker {
 
   /** 加载模型（start/sampleTimes 前调用一次）。 */
   async load(): Promise<void> {
+    if (this.disposed) throw new Error('视频姿态追踪器已停止');
     if (!this.landmarker) {
       this.landmarker = await createPoseLandmarker(this.opts);
     }
@@ -71,8 +76,18 @@ export class VideoFilePoseTracker {
       if (video.readyState < 2 || video.currentTime === this.lastVideoTime) return;
       this.lastInferMs = now;
       this.lastVideoTime = video.currentTime;
-      const result = this.landmarker!.detectForVideo(video, now);
-      onFrame(poseResultToPoseFrame(result, now, this.opts.trackingMode ?? 'full'));
+      try {
+        // MediaPipe 要求检测时间戳严格单调；PoseFrame 则使用媒体时间，
+        // 这样暂停、回放和导出时滤波/丢失回退都与视频进度一致。
+        const detectorTimestampMs = this.nextDetectorTimestamp(now);
+        const frameTimestampMs = Math.round(video.currentTime * 1000);
+        const result = this.landmarker!.detectForVideo(video, detectorTimestampMs);
+        onFrame(
+          poseResultToPoseFrame(result, frameTimestampMs, this.opts.trackingMode ?? 'full'),
+        );
+      } catch (err) {
+        this.opts.onError?.(err instanceof Error ? err : new Error(String(err)));
+      }
     };
     this.rafId = requestAnimationFrame(loop);
   }
@@ -96,8 +111,12 @@ export class VideoFilePoseTracker {
       });
     }
     for (const t of timesSec) {
+      if (this.disposed) break;
+      const boundedTime = Math.min(Math.max(0, t), Math.max(0, video.duration || t));
       // headless Chrome 对 H.264 seek 偶发不触发 seeked：超时重试一次，再超时则跳过该点
-      let ok = false;
+      let ok =
+        video.readyState >= 2 &&
+        Math.abs(video.currentTime - boundedTime) <= 1 / 240;
       for (let attempt = 0; attempt < 2 && !ok; attempt++) {
         ok = await new Promise<boolean>((resolve) => {
           const timer = setTimeout(() => resolve(false), 15000);
@@ -105,20 +124,37 @@ export class VideoFilePoseTracker {
             clearTimeout(timer);
             resolve(true);
           };
-          video.currentTime = t;
+          video.currentTime = boundedTime;
         });
       }
       if (!ok) {
-        console.warn(`[VideoFilePoseTracker] seek 超时，跳过 t=${t}s`);
+        console.warn(`[VideoFilePoseTracker] seek 超时，跳过 t=${boundedTime}s`);
         continue;
       }
-      const result = this.landmarker!.detectForVideo(video, Math.round(t * 1000));
-      onFrame(poseResultToPoseFrame(result, Math.round(t * 1000), this.opts.trackingMode ?? 'full'), t);
+      if (this.disposed || !this.landmarker) break;
+      const frameTimestampMs = Math.round(boundedTime * 1000);
+      const detectorTimestampMs = this.nextDetectorTimestamp(frameTimestampMs);
+      const result = this.landmarker!.detectForVideo(video, detectorTimestampMs);
+      onFrame(
+        poseResultToPoseFrame(
+          result,
+          frameTimestampMs,
+          this.opts.trackingMode ?? 'full',
+        ),
+        boundedTime,
+      );
     }
+  }
+
+  private nextDetectorTimestamp(preferredMs: number): number {
+    const next = Math.max(Math.round(preferredMs), this.lastDetectorTimestampMs + 1);
+    this.lastDetectorTimestampMs = next;
+    return next;
   }
 
   /** 停止推理并释放模型（不释放视频元素）。 */
   stop(): void {
+    this.disposed = true;
     this.running = false;
     if (this.rafId) cancelAnimationFrame(this.rafId);
     this.rafId = 0;

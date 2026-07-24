@@ -176,6 +176,16 @@ export class AvatarSceneController {
     return snapshotCanvas(this.renderer, this.scene, this.camera);
   }
 
+  /** 当前直播间渲染画布，供浏览器本地录制数字人视频。 */
+  getRenderCanvas(): HTMLCanvasElement {
+    return this.renderer.domElement;
+  }
+
+  getRenderSize(): { width: number; height: number } {
+    const canvas = this.renderer.domElement;
+    return { width: canvas.width, height: canvas.height };
+  }
+
   /** 加载随项目发布的 Kenney CC0 直播间。 */
   async loadBuiltInStudioRoom(): Promise<boolean> {
     try {

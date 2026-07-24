@@ -106,6 +106,8 @@ export class AvatarPackage {
   private restoreT = -1;
   private restoreEntries: RestoreEntry[] = [];
   private bindLocal = new Map<Object3D, { quat: Quaternion; pos: Vector3 }>();
+  /** 当前人物相对 StandardRig 1.70m 的尺寸，用于根运动重定向。 */
+  private motionScale = 1;
 
   constructor(opts: AvatarPackageOptions) {
     this.profile = opts.profile;
@@ -131,6 +133,7 @@ export class AvatarPackage {
         .getSize(new Vector3()).y;
       const positionScale =
         Number.isFinite(avatarHeight) && avatarHeight > 0.2 ? avatarHeight / 1.7 : 1;
+      this.motionScale = positionScale;
       for (const [id, clip] of createPresetClips()) {
         this.clips.set(id, retargetClipToRig(clip, this.animationBones, positionScale));
       }
@@ -258,6 +261,7 @@ export class AvatarPackage {
   playAnimation(id: PresetAnimationId | string): boolean {
     const clip = this.clips.get(id);
     if (!clip) return false;
+    this.resetDrivenHipsPosition();
     this.setNormalizedAnimationMode(true);
     this.cancelRestore();
     const action = this.mixer.clipAction(clip);
@@ -287,6 +291,31 @@ export class AvatarPackage {
     this.setNormalizedAnimationMode(false);
     this.cancelRestore();
     applyBoneRotations(this.driver, rotations);
+  }
+
+  /**
+   * 全身动捕的脚底锁定补偿：相对绑定姿态下移/上移 Hips。
+   * 输入使用 StandardRig 米制，导入人物按实际身高重定向；不改 AvatarPackage
+   * 的站位，因此可与直播间 X/Y/Z 站位和整体缩放叠加。
+   */
+  applyHipsOffsetY(offsetMeters: number): void {
+    this.setNormalizedAnimationMode(false);
+    this.cancelRestore();
+    const hips = this.driver.bones.get('Hips');
+    const bind = hips ? this.bindLocal.get(hips) : null;
+    if (!hips || !hips.parent || !bind) return;
+
+    const offset = Math.min(0.15, Math.max(-0.7, offsetMeters)) * this.motionScale;
+    hips.position.copy(bind.pos);
+    this.root.updateMatrixWorld(true);
+    const bindWorld = hips.getWorldPosition(new Vector3());
+    const rootOrigin = this.root.localToWorld(new Vector3(0, 0, 0));
+    const rootOffset = this.root
+      .localToWorld(new Vector3(0, offset, 0))
+      .sub(rootOrigin);
+    const targetWorld = bindWorld.add(rootOffset);
+    hips.position.copy(hips.parent.worldToLocal(targetWorld));
+    hips.updateMatrixWorld(true);
   }
 
   /** 摄像头面部驱动：写入 VRM/GLB morph 或内置底模的简化表情。 */
@@ -390,6 +419,12 @@ export class AvatarPackage {
   private cancelRestore(): void {
     this.restoreT = -1;
     this.restoreEntries = [];
+  }
+
+  private resetDrivenHipsPosition(): void {
+    const hips = this.driver.bones.get('Hips');
+    const bind = hips ? this.bindLocal.get(hips) : null;
+    if (hips && bind) hips.position.copy(bind.pos);
   }
 
   /**

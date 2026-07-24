@@ -18,10 +18,14 @@ import {
   HandDriveManager,
   HandFrameStabilizer,
   HandFrameSmoother,
+  CrouchMotionTracker,
   FaceDriveManager,
   type FaceTrackingStatus,
   LandmarkSmoother,
   TrackingLossManager,
+  calibrate,
+  calibrationHipHeight,
+  estimateStandingHipHeight,
   mapPoseFrameToBoneRotations,
   type CalibrationData,
   type TrackingStatus,
@@ -31,6 +35,7 @@ import {
   CameraPoseTracker,
   FaceTracker,
   HandTracker,
+  VideoFilePoseTracker,
   type CalibrationSessionState,
 } from '@dhp/vision-runtime';
 import { api, ApiError, fetchAuthedObjectUrl } from '../api/client';
@@ -43,6 +48,10 @@ import {
   type AvatarSceneController,
   type StudioCameraPose,
 } from '../three/AvatarSceneController';
+import {
+  CanvasVideoRecorder,
+  getSupportedVideoMimeType,
+} from '../video/CanvasVideoRecorder';
 
 type DriveState = 'idle' | 'starting' | 'calibrating' | 'driving' | 'denied';
 
@@ -54,6 +63,23 @@ type HandPresence = 'none' | 'left' | 'right' | 'both';
 
 type AvatarStance = 'standing' | 'seated' | 'transition';
 type RoomStatus = 'loading' | 'ready' | 'error' | 'none';
+type DanceState =
+  | 'empty'
+  | 'loading'
+  | 'ready'
+  | 'analyzing'
+  | 'previewing'
+  | 'recording'
+  | 'completed'
+  | 'error';
+
+interface DanceVideoInfo {
+  name: string;
+  durationSec: number;
+  width: number;
+  height: number;
+  sizeBytes: number;
+}
 
 const DEFAULT_PLACEMENT: AvatarPlacement = {
   x: 0,
@@ -67,6 +93,62 @@ interface SavedCamera {
   id: string;
   label: string;
   pose: StudioCameraPose;
+}
+
+function formatDuration(seconds: number): string {
+  const whole = Math.max(0, Math.round(seconds));
+  const minutes = Math.floor(whole / 60);
+  return `${minutes}:${String(whole % 60).padStart(2, '0')}`;
+}
+
+/** 兼容片头/空镜：先覆盖整段粗扫，再围绕最清晰的全身帧做精细标定。 */
+function buildDanceCalibrationScanTimes(durationSec: number): number[] {
+  const end = Math.max(0.1, durationSec - 0.05);
+  const initialEnd = Math.min(end, 3);
+  const initial = Array.from({ length: 8 }, (_, index) =>
+    Number((0.05 + ((initialEnd - 0.05) * index) / 7).toFixed(3)),
+  );
+  const coarseCount = Math.min(20, Math.max(8, Math.ceil(durationSec / 15)));
+  const coarse = Array.from({ length: coarseCount }, (_, index) =>
+    Number((0.05 + ((end - 0.05) * index) / Math.max(1, coarseCount - 1)).toFixed(3)),
+  );
+  return [...new Set([...initial, ...coarse])].sort((a, b) => a - b);
+}
+
+function hasDanceCalibrationCore(frame: PoseFrame): boolean {
+  const map = new Map(frame.landmarks.map((landmark) => [landmark.name, landmark.visibility]));
+  return ['nose', 'left_shoulder', 'right_shoulder', 'left_hip', 'right_hip'].every(
+    (name) => (map.get(name) ?? 0) >= 0.45,
+  );
+}
+
+function seekVideo(video: HTMLVideoElement, timeSec: number): Promise<void> {
+  const target = Math.min(Math.max(0, timeSec), Math.max(0, video.duration || timeSec));
+  if (video.readyState >= 2 && Math.abs(video.currentTime - target) <= 1 / 240) {
+    return Promise.resolve();
+  }
+  return new Promise((resolve, reject) => {
+    const timer = window.setTimeout(() => {
+      cleanup();
+      reject(new Error('视频定位超时，请尝试重新导入'));
+    }, 8000);
+    const cleanup = () => {
+      window.clearTimeout(timer);
+      video.removeEventListener('seeked', onSeeked);
+      video.removeEventListener('error', onError);
+    };
+    const onSeeked = () => {
+      cleanup();
+      resolve();
+    };
+    const onError = () => {
+      cleanup();
+      reject(new Error('视频读取失败'));
+    };
+    video.addEventListener('seeked', onSeeked, { once: true });
+    video.addEventListener('error', onError, { once: true });
+    video.currentTime = target;
+  });
 }
 
 /**
@@ -86,6 +168,7 @@ export function MotionPage() {
   const lossMgrRef = useRef(new TrackingLossManager());
   const sessionRef = useRef<CalibrationSession | null>(null);
   const calibrationRef = useRef<CalibrationData | null>(null);
+  const crouchMotionRef = useRef(new CrouchMotionTracker());
   const videoRef = useRef<HTMLVideoElement>(null);
   const roomInputRef = useRef<HTMLInputElement>(null);
   const stanceTimerRef = useRef<number | null>(null);
@@ -103,6 +186,26 @@ export function MotionPage() {
   const faceEnabledRef = useRef(false);
   const faceAutoStartedRef = useRef(false);
   const rigBonesRef = useRef<ReadonlySet<string> | null>(null);
+  // 真人舞蹈视频驱动（独立于摄像头，源文件与推理结果都只保留在浏览器内存）
+  const danceInputRef = useRef<HTMLInputElement>(null);
+  const danceVideoRef = useRef<HTMLVideoElement>(null);
+  const danceFileRef = useRef<File | null>(null);
+  const danceSourceUrlRef = useRef<string | null>(null);
+  const danceOutputUrlRef = useRef<string | null>(null);
+  const danceTrackerRef = useRef<VideoFilePoseTracker | null>(null);
+  const danceHandTrackerRef = useRef<HandTracker | null>(null);
+  const danceRecorderRef = useRef<CanvasVideoRecorder | null>(null);
+  const danceCalibrationRef = useRef<CalibrationData | null>(null);
+  const danceCrouchMotionRef = useRef(new CrouchMotionTracker());
+  const danceStateRef = useRef<DanceState>('empty');
+  const danceFinishingRef = useRef(false);
+  const danceRunTokenRef = useRef(0);
+  const danceSmootherRef = useRef(new LandmarkSmoother({ minCutoff: 1.5, beta: 0.3 }));
+  const danceLossMgrRef = useRef(new TrackingLossManager({ trackingMode: 'full' }));
+  const latestDancePoseRef = useRef<PoseFrame | null>(null);
+  const danceHandStabilizerRef = useRef(new HandFrameStabilizer());
+  const danceHandSmootherRef = useRef(new HandFrameSmoother({ minCutoff: 2.0, beta: 0.5 }));
+  const danceHandDriveRef = useRef(new HandDriveManager());
 
   const [avatarName, setAvatarName] = useState('');
   const [fatalError, setFatalError] = useState('');
@@ -127,6 +230,24 @@ export function MotionPage() {
   const [savedCameras, setSavedCameras] = useState<SavedCamera[]>([]);
   const [placement, setPlacement] = useState<AvatarPlacement>(DEFAULT_PLACEMENT);
   const [stance, setStance] = useState<AvatarStance>('standing');
+  const [danceState, setDanceStateValue] = useState<DanceState>('empty');
+  const [danceInfo, setDanceInfo] = useState<DanceVideoInfo | null>(null);
+  const [danceProgress, setDanceProgress] = useState(0);
+  const [danceQuality, setDanceQuality] = useState<PoseQuality>('accurate');
+  const [danceTrackingStatus, setDanceTrackingStatus] =
+    useState<TrackingStatus>('tracking');
+  const [danceHandPresence, setDanceHandPresence] = useState<HandPresence>('none');
+  const [danceCalibrationConfidence, setDanceCalibrationConfidence] = useState<number | null>(
+    null,
+  );
+  const [danceError, setDanceError] = useState('');
+  const [danceOutputUrl, setDanceOutputUrl] = useState<string | null>(null);
+  const [danceOutputName, setDanceOutputName] = useState('digital-human-dance.webm');
+
+  const setDanceState = (state: DanceState) => {
+    danceStateRef.current = state;
+    setDanceStateValue(state);
+  };
 
   const setTrackingMode = (mode: PoseTrackingMode) => {
     trackingModeRef.current = mode;
@@ -149,7 +270,11 @@ export function MotionPage() {
       const sessionState = session.addFrame(smoothed);
       setCalibState(sessionState);
       if (sessionState.status === 'success') {
-        calibrationRef.current = session.getResult();
+        const calibration = session.getResult();
+        calibrationRef.current = calibration;
+        crouchMotionRef.current.setBaseline(
+          calibration ? calibrationHipHeight(calibration) : null,
+        );
         sessionRef.current = null;
         controllerRef.current?.pkg?.stopAnimation();
         setActiveAnim(null);
@@ -169,8 +294,68 @@ export function MotionPage() {
       });
       const out = lossMgrRef.current.updateWithFrame(smoothed.timestampMs, smoothed, rotations);
       setTrackingStatus((prev) => (prev === out.status ? prev : out.status));
-      controllerRef.current?.pkg?.applyBoneRotations(out.rotations);
+      const pkg = controllerRef.current?.pkg;
+      pkg?.applyBoneRotations(out.rotations);
+      if (trackingModeRef.current === 'full' && out.status === 'tracking') {
+        pkg?.applyHipsOffsetY(crouchMotionRef.current.update(smoothed));
+      } else if (trackingModeRef.current === 'upper') {
+        // 上半身模式严格不参与髋关节和根位移。
+        pkg?.applyHipsOffsetY(0);
+      }
     }
+  }, []);
+
+  // ---------- 真人视频姿态帧：全身绝对方向 + 视频时间线抗抖 ----------
+  const handleDanceFrame = useCallback((frame: PoseFrame) => {
+    const calibration = danceCalibrationRef.current;
+    if (!calibration) return;
+    const smoothed = danceSmootherRef.current.apply(frame);
+    latestDancePoseRef.current = smoothed;
+    const rotations = mapPoseFrameToBoneRotations(smoothed, calibration, {
+      mirror: false,
+      trackingMode: 'full',
+    });
+    const out = danceLossMgrRef.current.updateWithFrame(
+      smoothed.timestampMs,
+      smoothed,
+      rotations,
+    );
+    setDanceTrackingStatus((previous) =>
+      previous === out.status ? previous : out.status,
+    );
+    controllerRef.current?.pkg?.applyBoneRotations(out.rotations);
+    if (out.status === 'tracking') {
+      controllerRef.current?.pkg?.applyHipsOffsetY(
+        danceCrouchMotionRef.current.update(smoothed),
+      );
+    }
+    const video = danceVideoRef.current;
+    if (video?.duration) {
+      const next = Math.min(1, video.currentTime / video.duration);
+      setDanceProgress((previous) =>
+        Math.abs(previous - next) >= 0.005 ? next : previous,
+      );
+    }
+  }, []);
+
+  const handleDanceHandFrame = useCallback((frame: HandFrame) => {
+    const stabilized = danceHandStabilizerRef.current.apply(
+      frame,
+      latestDancePoseRef.current,
+    );
+    const smoothed = danceHandSmootherRef.current.apply(stabilized);
+    const rotations = danceHandDriveRef.current.update(
+      smoothed,
+      smoothed.timestampMs,
+      latestDancePoseRef.current,
+    );
+    controllerRef.current?.pkg?.applyBoneRotations(rotations);
+    const left = smoothed.hands.some((hand) => hand.handedness === 'left' && hand.score >= 0.5);
+    const right = smoothed.hands.some(
+      (hand) => hand.handedness === 'right' && hand.score >= 0.5,
+    );
+    const next: HandPresence = left && right ? 'both' : left ? 'left' : right ? 'right' : 'none';
+    setDanceHandPresence((previous) => (previous === next ? previous : next));
   }, []);
 
   // ---------- 手部帧处理（HandTracker 回调） ----------
@@ -387,6 +572,17 @@ export function MotionPage() {
             handMaxAngularVelocityDegPerSec: 300,
             handRotationDeadbandDeg: 1.5,
           });
+          danceHandDriveRef.current = new HandDriveManager({
+            rigBones: rigBonesRef.current,
+            scoreThreshold: 0.55,
+            kinematicPriorWeight: 0.4,
+            temporalSmoothingMs: 45,
+            maxAngularVelocityDegPerSec: 900,
+            handOrientationCalibrationFrames: 10,
+            handTemporalSmoothingMs: 120,
+            handMaxAngularVelocityDegPerSec: 300,
+            handRotationDeadbandDeg: 1.5,
+          });
           setFingerSupport(
             (FINGER_EXTENSION_BONES as readonly string[]).some((b) => bones.has(b as ExtendedRigBone)),
           );
@@ -495,6 +691,14 @@ export function MotionPage() {
       faceTrackerRef.current = null;
       trackerRef.current?.stop();
       trackerRef.current = null;
+      danceTrackerRef.current?.stop();
+      danceTrackerRef.current = null;
+      danceHandTrackerRef.current?.stop();
+      danceHandTrackerRef.current = null;
+      danceRecorderRef.current?.cancel();
+      danceRecorderRef.current = null;
+      if (danceSourceUrlRef.current) URL.revokeObjectURL(danceSourceUrlRef.current);
+      if (danceOutputUrlRef.current) URL.revokeObjectURL(danceOutputUrlRef.current);
     };
   }, []);
 
@@ -514,6 +718,13 @@ export function MotionPage() {
   // ---------- 预置动作 ----------
   const play = (animId: PresetAnimationId) => {
     if (driveState === 'calibrating' || driveState === 'driving') return;
+    if (
+      danceStateRef.current === 'analyzing' ||
+      danceStateRef.current === 'previewing' ||
+      danceStateRef.current === 'recording'
+    ) {
+      return;
+    }
     if (stance === 'transition') return;
     if (animId === 'sit-down-01' && stance !== 'standing') return;
     if (animId === 'stand-up-01' && stance !== 'seated') return;
@@ -544,6 +755,14 @@ export function MotionPage() {
   // ---------- 摄像头驱动 ----------
   const startCamera = async () => {
     setErrorMsg('');
+    if (
+      danceStateRef.current === 'analyzing' ||
+      danceStateRef.current === 'previewing' ||
+      danceStateRef.current === 'recording'
+    ) {
+      setErrorMsg('请先停止真人视频复现，再启动摄像头驱动');
+      return;
+    }
     if (stance !== 'standing') {
       setErrorMsg(stance === 'seated' ? '请先播放“站起”，再启动摄像头驱动' : '请等待起坐动作完成');
       return;
@@ -573,6 +792,8 @@ export function MotionPage() {
       trackerRef.current = tracker;
       await tracker.start();
       smootherRef.current.reset();
+      crouchMotionRef.current.reset();
+      controllerRef.current?.pkg?.applyHipsOffsetY(0);
       lossMgrRef.current = new TrackingLossManager({ trackingMode: mode });
       const session = new CalibrationSession({ durationMs: 2500, mirror: false, trackingMode: mode });
       sessionRef.current = session;
@@ -593,6 +814,8 @@ export function MotionPage() {
   };
 
   const retryCalibration = () => {
+    crouchMotionRef.current.setBaseline(null);
+    controllerRef.current?.pkg?.applyHipsOffsetY(0);
     if (sessionRef.current) {
       sessionRef.current.begin();
       setCalibState(sessionRef.current.getState());
@@ -616,11 +839,356 @@ export function MotionPage() {
     trackerRef.current = null;
     sessionRef.current = null;
     calibrationRef.current = null;
+    crouchMotionRef.current.setBaseline(null);
+    controllerRef.current?.pkg?.applyHipsOffsetY(0);
     setCalibState(null);
     setDrive('idle');
     // 回待机动作
     controllerRef.current?.pkg?.playAnimation('idle-01');
     setActiveAnim('idle-01');
+  };
+
+  // ---------- 真人视频复现与数字人视频导出 ----------
+  const stopDanceModels = () => {
+    danceTrackerRef.current?.stop();
+    danceTrackerRef.current = null;
+    danceHandTrackerRef.current?.stop();
+    danceHandTrackerRef.current = null;
+  };
+
+  const clearDanceOutput = () => {
+    if (danceOutputUrlRef.current) {
+      URL.revokeObjectURL(danceOutputUrlRef.current);
+      danceOutputUrlRef.current = null;
+    }
+    setDanceOutputUrl(null);
+  };
+
+  const cancelDanceRun = () => {
+    danceRunTokenRef.current += 1;
+    danceFinishingRef.current = false;
+    danceVideoRef.current?.pause();
+    stopDanceModels();
+    danceRecorderRef.current?.cancel();
+    danceRecorderRef.current = null;
+    danceSmootherRef.current.reset();
+    danceLossMgrRef.current.reset();
+    danceHandStabilizerRef.current.reset();
+    danceHandSmootherRef.current.reset();
+    danceHandDriveRef.current.reset();
+    danceCrouchMotionRef.current.reset();
+    controllerRef.current?.pkg?.applyHipsOffsetY(0);
+    latestDancePoseRef.current = null;
+    setDanceProgress(0);
+    setDanceTrackingStatus('tracking');
+    setDanceHandPresence('none');
+    setDanceState(danceInfo ? 'ready' : 'empty');
+    controllerRef.current?.pkg?.playAnimation('idle-01');
+    setActiveAnim('idle-01');
+  };
+
+  const finishDanceRun = async () => {
+    if (danceFinishingRef.current) return;
+    const state = danceStateRef.current;
+    if (state !== 'previewing' && state !== 'recording') return;
+    danceFinishingRef.current = true;
+    danceVideoRef.current?.pause();
+    stopDanceModels();
+    setDanceProgress(1);
+
+    try {
+      if (state === 'recording' && danceRecorderRef.current) {
+        const recorder = danceRecorderRef.current;
+        danceRecorderRef.current = null;
+        const blob = await recorder.stop();
+        if (blob.size === 0) throw new Error('导出文件为空，请重新录制');
+        clearDanceOutput();
+        const outputUrl = URL.createObjectURL(blob);
+        danceOutputUrlRef.current = outputUrl;
+        setDanceOutputUrl(outputUrl);
+        const anchor = document.createElement('a');
+        anchor.href = outputUrl;
+        anchor.download = danceOutputName;
+        anchor.click();
+      }
+      setDanceState('completed');
+    } catch (error) {
+      setDanceError(error instanceof Error ? error.message : '数字人视频导出失败');
+      setDanceState('error');
+    } finally {
+      danceFinishingRef.current = false;
+    }
+  };
+
+  const analyzeDanceVideo = async (
+    video: HTMLVideoElement,
+    runToken: number,
+  ): Promise<void> => {
+    if (danceCalibrationRef.current) return;
+    setDanceState('analyzing');
+    const calibrationFrames: PoseFrame[] = [];
+    const tracker = new VideoFilePoseTracker({
+      wasmBasePath: '/mediapipe/wasm',
+      modelVariant: danceQuality === 'accurate' ? 'heavy' : 'full',
+      quality: {
+        targetFps: 30,
+        minPoseDetectionConfidence: 0.5,
+        minPosePresenceConfidence: 0.5,
+        minTrackingConfidence: 0.5,
+      },
+      video,
+      trackingMode: 'full',
+    });
+    danceTrackerRef.current = tracker;
+    try {
+      const scanFrames: Array<{ frame: PoseFrame; timeSec: number }> = [];
+      const scanTimes = buildDanceCalibrationScanTimes(video.duration);
+      let scanned = 0;
+      await tracker.sampleTimes(scanTimes, (frame, timeSec) => {
+        scanned += 1;
+        setDanceProgress((scanned / scanTimes.length) * 0.7);
+        if (hasDanceCalibrationCore(frame)) scanFrames.push({ frame, timeSec });
+      });
+      if (runToken !== danceRunTokenRef.current) throw new Error('视频分析已取消');
+      const best = scanFrames.sort((a, b) => b.frame.confidence - a.frame.confidence)[0];
+      if (!best) {
+        throw new Error('未识别到稳定的全身姿态，请使用光线充足、头手脚完整入镜的视频');
+      }
+      const fineStart = Math.max(0.05, best.timeSec - 0.6);
+      const fineEnd = Math.min(video.duration - 0.05, best.timeSec + 0.6);
+      const fineTimes = Array.from({ length: 13 }, (_, index) =>
+        Number((fineStart + ((fineEnd - fineStart) * index) / 12).toFixed(3)),
+      );
+      let fineScanned = 0;
+      await tracker.sampleTimes(fineTimes, (frame) => {
+        fineScanned += 1;
+        setDanceProgress(0.7 + (fineScanned / fineTimes.length) * 0.3);
+        if (frame.confidence >= 0.35 && hasDanceCalibrationCore(frame)) {
+          calibrationFrames.push(frame);
+        }
+      });
+      if (runToken !== danceRunTokenRef.current) throw new Error('视频分析已取消');
+      if (calibrationFrames.length < 4) calibrationFrames.push(best.frame);
+      if (calibrationFrames.length < 2) {
+        throw new Error('全身姿态只短暂出现，请选择人体连续清晰可见的视频');
+      }
+      const calibration = calibrate(calibrationFrames, {
+        mirror: false,
+        visibilityThreshold: 0.45,
+      });
+      danceCalibrationRef.current = calibration;
+      danceCrouchMotionRef.current.setBaseline(
+        estimateStandingHipHeight([
+          ...scanFrames.map((candidate) => candidate.frame),
+          ...calibrationFrames,
+        ]),
+      );
+      setDanceCalibrationConfidence(calibration.meanConfidence);
+    } finally {
+      tracker.stop();
+      if (danceTrackerRef.current === tracker) danceTrackerRef.current = null;
+    }
+  };
+
+  const startDanceRun = async (mode: 'preview' | 'record') => {
+    const video = danceVideoRef.current;
+    const file = danceFileRef.current;
+    const controller = controllerRef.current;
+    if (!video || !file || !danceInfo || !controller?.pkg) return;
+    if (driveStateRef.current !== 'idle') {
+      setDanceError('请先停止摄像头驱动，再复现真人视频');
+      return;
+    }
+    if (mode === 'record' && !getSupportedVideoMimeType()) {
+      setDanceError('当前浏览器不支持 WebM 录制，请使用最新版 Chrome 或 Edge');
+      setDanceState('error');
+      return;
+    }
+
+    const runToken = danceRunTokenRef.current + 1;
+    danceRunTokenRef.current = runToken;
+    danceFinishingRef.current = false;
+    setDanceError('');
+    setDanceProgress(0);
+    setDanceTrackingStatus('tracking');
+    setDanceHandPresence('none');
+    clearDanceOutput();
+
+    try {
+      await analyzeDanceVideo(video, runToken);
+      if (runToken !== danceRunTokenRef.current) return;
+      setDanceProgress(0);
+      await seekVideo(video, 0);
+
+      if (stanceTimerRef.current !== null) {
+        window.clearTimeout(stanceTimerRef.current);
+        stanceTimerRef.current = null;
+      }
+      setStance('standing');
+      controller.pkg.stopAnimation();
+      controller.pkg.resetFaceExpressions();
+      setActiveAnim(null);
+      danceSmootherRef.current.reset();
+      danceLossMgrRef.current = new TrackingLossManager({
+        trackingMode: 'full',
+        confidenceThreshold: 0.48,
+        freezeDelayMs: 300,
+        blendStartMs: 750,
+        blendDurationMs: 450,
+      });
+      danceHandStabilizerRef.current.reset();
+      danceHandSmootherRef.current.reset();
+      danceHandDriveRef.current.reset();
+      danceCrouchMotionRef.current.reset();
+      controller.pkg.applyHipsOffsetY(0);
+      latestDancePoseRef.current = null;
+
+      const poseTracker = new VideoFilePoseTracker({
+        wasmBasePath: '/mediapipe/wasm',
+        modelVariant: danceQuality === 'accurate' ? 'heavy' : 'full',
+        quality: {
+          targetFps: 30,
+          minPoseDetectionConfidence: 0.5,
+          minPosePresenceConfidence: 0.5,
+          minTrackingConfidence: 0.5,
+        },
+        video,
+        trackingMode: 'full',
+        onError: (error) => setDanceError(`姿态识别异常：${error.message}`),
+      });
+      danceTrackerRef.current = poseTracker;
+
+      const handTracker = new HandTracker({
+        wasmBasePath: '/mediapipe/wasm',
+        video,
+        frameTimestampSource: 'video',
+        targetFps: 24,
+        startDelayMs: 28,
+        minHandDetectionConfidence: 0.6,
+        minHandPresenceConfidence: 0.55,
+        minTrackingConfidence: 0.6,
+        onFrame: handleDanceHandFrame,
+        onError: (error) => setDanceError(`手部细节识别降级：${error.message}`),
+      });
+      danceHandTrackerRef.current = handTracker;
+
+      // 两个模型并行预热；手部模型失败时仍保留完整的身体舞蹈驱动。
+      await Promise.all([
+        poseTracker.load(),
+        handTracker.start().catch(() => {
+          if (danceHandTrackerRef.current === handTracker) danceHandTrackerRef.current = null;
+        }),
+      ]);
+      if (runToken !== danceRunTokenRef.current) {
+        stopDanceModels();
+        return;
+      }
+
+      if (mode === 'record') {
+        const renderSize = controller.getRenderSize();
+        if (renderSize.width === 0 || renderSize.height === 0) {
+          throw new Error('直播间画布尚未就绪');
+        }
+        const recorder = new CanvasVideoRecorder();
+        recorder.start(controller.getRenderCanvas(), {
+          fps: 30,
+          videoBitsPerSecond: 8_000_000,
+          sourceVideo: video,
+        });
+        danceRecorderRef.current = recorder;
+        setDanceState('recording');
+      } else {
+        setDanceState('previewing');
+      }
+
+      await poseTracker.start(handleDanceFrame);
+    } catch (error) {
+      if (runToken !== danceRunTokenRef.current) return;
+      stopDanceModels();
+      danceRecorderRef.current?.cancel();
+      danceRecorderRef.current = null;
+      setDanceError(error instanceof Error ? error.message : '真人视频分析失败');
+      setDanceState('error');
+    }
+  };
+
+  const onDanceFileChange = async (event: ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    event.target.value = '';
+    if (!file || !danceVideoRef.current) return;
+    if (!file.type.startsWith('video/') && !/\.(mp4|webm|mov|m4v)$/i.test(file.name)) {
+      setDanceError('请选择 MP4、WebM、MOV 或 M4V 视频文件');
+      setDanceState('error');
+      return;
+    }
+    if (file.size > 500 * 1024 * 1024) {
+      setDanceError('视频文件不能超过 500 MB');
+      setDanceState('error');
+      return;
+    }
+
+    if (
+      danceStateRef.current === 'analyzing' ||
+      danceStateRef.current === 'previewing' ||
+      danceStateRef.current === 'recording'
+    ) {
+      cancelDanceRun();
+    }
+    clearDanceOutput();
+    danceCalibrationRef.current = null;
+    danceCrouchMotionRef.current.setBaseline(null);
+    setDanceCalibrationConfidence(null);
+    setDanceInfo(null);
+    setDanceError('');
+    setDanceState('loading');
+    if (danceSourceUrlRef.current) URL.revokeObjectURL(danceSourceUrlRef.current);
+    const sourceUrl = URL.createObjectURL(file);
+    danceSourceUrlRef.current = sourceUrl;
+    danceFileRef.current = file;
+
+    const video = danceVideoRef.current;
+    try {
+      const metadataReady = new Promise<void>((resolve, reject) => {
+        const cleanup = () => {
+          video.removeEventListener('loadedmetadata', onLoaded);
+          video.removeEventListener('error', onError);
+        };
+        const onLoaded = () => {
+          cleanup();
+          resolve();
+        };
+        const onError = () => {
+          cleanup();
+          reject(new Error('视频解码失败，请尝试 H.264 MP4 或 VP9 WebM 格式'));
+        };
+        video.addEventListener('loadedmetadata', onLoaded, { once: true });
+        video.addEventListener('error', onError, { once: true });
+      });
+      video.src = sourceUrl;
+      video.load();
+      await metadataReady;
+      if (!Number.isFinite(video.duration) || video.duration <= 0) {
+        throw new Error('无法读取视频时长');
+      }
+      // 容忍容器尾帧时间戳略超标（例如 15:00.012）。
+      if (video.duration > 15 * 60 + 1) {
+        throw new Error('单个视频最长支持 15 分钟，请先裁剪后再导入');
+      }
+      const info: DanceVideoInfo = {
+        name: file.name,
+        durationSec: video.duration,
+        width: video.videoWidth,
+        height: video.videoHeight,
+        sizeBytes: file.size,
+      };
+      setDanceInfo(info);
+      const baseName = file.name.replace(/\.[^.]+$/, '') || 'dance';
+      setDanceOutputName(`${baseName}-digital-human.webm`);
+      setDanceState('ready');
+    } catch (error) {
+      setDanceError(error instanceof Error ? error.message : '视频读取失败');
+      setDanceState('error');
+    }
   };
 
   if (fatalError) {
@@ -635,7 +1203,15 @@ export function MotionPage() {
   }
 
   const cameraActive = driveState === 'calibrating' || driveState === 'driving';
+  const danceBusy =
+    danceState === 'analyzing' ||
+    danceState === 'previewing' ||
+    danceState === 'recording';
+  const runtimeBusy = cameraActive || danceBusy;
   const trackingLost = driveState === 'driving' && (trackingStatus === 'lost' || trackingStatus === 'blending');
+  const danceTrackingLost =
+    (danceState === 'previewing' || danceState === 'recording') &&
+    (danceTrackingStatus === 'lost' || danceTrackingStatus === 'blending');
   const activeCameraLabel =
     STUDIO_CAMERA_PRESETS.find((camera) => camera.id === activeStudioCamera)?.label ??
     savedCameras.find((camera) => camera.id === activeStudioCamera)?.label ??
@@ -657,8 +1233,10 @@ export function MotionPage() {
           overlay={
             <>
               <div className="studio-live-hud">
-                <span className="studio-live-dot" />
-                PREVIEW
+                <span
+                  className={`studio-live-dot ${danceState === 'recording' ? 'recording' : ''}`}
+                />
+                {danceState === 'recording' ? 'REC' : 'PREVIEW'}
                 <span className="studio-camera-name">{activeCameraLabel}</span>
               </div>
               <video
@@ -667,6 +1245,23 @@ export function MotionPage() {
                 muted
                 playsInline
               />
+              <video
+                ref={danceVideoRef}
+                className={`dance-video-preview ${danceInfo && !cameraActive ? 'active' : ''}`}
+                muted
+                playsInline
+                preload="metadata"
+                onTimeUpdate={(event) => {
+                  const video = event.currentTarget;
+                  if (video.duration) setDanceProgress(Math.min(1, video.currentTime / video.duration));
+                }}
+                onEnded={() => void finishDanceRun()}
+              />
+              {danceInfo && !cameraActive && (
+                <div className="dance-source-label">
+                  真人源视频 · 不镜像
+                </div>
+              )}
               {driveState === 'calibrating' && calibState && (
                 <div className="calib-panel">
                   <h3>站姿校准{trackingMode === 'upper' ? '（上半身）' : ''}</h3>
@@ -699,6 +1294,11 @@ export function MotionPage() {
               )}
               {trackingLost && (
                 <div className="viewport-banner warning">跟踪已丢失，请回到画面中央</div>
+              )}
+              {danceTrackingLost && (
+                <div className="viewport-banner warning">
+                  此段人体被遮挡，已平滑保持最近可信姿态
+                </div>
               )}
             </>
           }
@@ -894,7 +1494,7 @@ export function MotionPage() {
                 <button
                   key={p.id}
                   className={`btn ${activeAnim === p.id ? 'btn-primary' : ''}`}
-                  disabled={cameraActive || unavailableForStance}
+                  disabled={runtimeBusy || unavailableForStance}
                   onClick={() => play(p.id)}
                 >
                   {p.label}
@@ -907,7 +1507,160 @@ export function MotionPage() {
               {stance === 'standing' ? '站立' : stance === 'seated' ? '坐姿' : '动作过渡中'}
               。坐下与站起共享反向关键帧并保持末帧，导入人物按绑定骨架重定向。
             </p>
-            {cameraActive && <p className="muted">摄像头驱动中，预置动作已暂停。</p>}
+            {runtimeBusy && <p className="muted">骨架驱动中，预置动作已暂停。</p>}
+          </section>
+
+          <section>
+            <h3 className="param-group-title">
+              真人舞蹈复现 <Badge kind="info">本地 AI</Badge>
+            </h3>
+            <p className="muted">
+              导入真人全身视频后，系统会逐帧识别身体、手掌和手指，自动标定并驱动当前
+              数字人。源视频不镜像，左右手按解剖学对应；原视频、关键点和导出文件均不上传。
+            </p>
+            <input
+              ref={danceInputRef}
+              className="studio-file-input"
+              type="file"
+              accept="video/mp4,video/webm,video/quicktime,.m4v"
+              onChange={(event) => void onDanceFileChange(event)}
+            />
+            {danceInfo ? (
+              <div className="dance-file-card">
+                <strong title={danceInfo.name}>{danceInfo.name}</strong>
+                <span className="muted">
+                  {danceInfo.width}×{danceInfo.height} · {formatDuration(danceInfo.durationSec)} ·{' '}
+                  {(danceInfo.sizeBytes / 1024 / 1024).toFixed(1)} MB
+                </span>
+              </div>
+            ) : (
+              <p className="muted">支持 MP4、WebM、MOV、M4V，单文件不超过 500 MB / 15 分钟。</p>
+            )}
+
+            <div className="mode-select">
+              <button
+                className={`btn btn-sm ${danceQuality === 'accurate' ? 'btn-primary' : ''}`}
+                disabled={danceBusy}
+                onClick={() => {
+                  setDanceQuality('accurate');
+                  danceCalibrationRef.current = null;
+                  setDanceCalibrationConfidence(null);
+                }}
+              >
+                精准复现
+              </button>
+              <button
+                className={`btn btn-sm ${danceQuality === 'smooth' ? 'btn-primary' : ''}`}
+                disabled={danceBusy}
+                onClick={() => {
+                  setDanceQuality('smooth');
+                  danceCalibrationRef.current = null;
+                  setDanceCalibrationConfidence(null);
+                }}
+              >
+                流畅复现
+              </button>
+            </div>
+            <p className="muted">
+              {danceQuality === 'accurate'
+                ? '使用 Heavy 高精度全身模型（推荐），并叠加 21 点双手识别、蹲起脚底锁定与分级抗抖。'
+                : '使用 Full 轻量模型，保留蹲起脚底锁定，适合较长视频或低配电脑。'}
+            </p>
+
+            {(danceBusy || danceState === 'completed') && (
+              <>
+                <div className="dance-progress-meta">
+                  <span>
+                    {danceState === 'analyzing'
+                      ? '正在扫描清晰全身片段并自动标定…'
+                      : danceState === 'recording'
+                        ? '正在录制数字人视频'
+                        : danceState === 'previewing'
+                          ? '正在预览复现'
+                          : '处理完成'}
+                  </span>
+                  <span>{Math.round(danceProgress * 100)}%</span>
+                </div>
+                <div className="progress-bar">
+                  <div className="progress-fill" style={{ width: `${danceProgress * 100}%` }} />
+                </div>
+              </>
+            )}
+
+            {danceCalibrationConfidence !== null && (
+              <p>
+                <Badge kind={danceCalibrationConfidence >= 0.65 ? 'success' : 'warning'}>
+                  标定置信度 {(danceCalibrationConfidence * 100).toFixed(0)}%
+                </Badge>{' '}
+                {(danceState === 'previewing' || danceState === 'recording') && (
+                  <>
+                    <Badge kind={danceTrackingStatus === 'tracking' ? 'success' : 'warning'}>
+                      {danceTrackingStatus === 'tracking' ? '身体稳定' : '遮挡回退'}
+                    </Badge>{' '}
+                    <Badge kind={danceHandPresence === 'none' ? 'info' : 'success'}>
+                      {danceHandPresence === 'both'
+                        ? '双手细节'
+                        : danceHandPresence === 'left'
+                          ? '左手细节'
+                          : danceHandPresence === 'right'
+                            ? '右手细节'
+                            : '未检出手部细节'}
+                    </Badge>
+                  </>
+                )}
+              </p>
+            )}
+
+            {danceState === 'loading' && <p className="muted">正在读取本地视频元数据…</p>}
+            {danceState === 'completed' && (
+              <p>
+                <Badge kind="success">
+                  {danceOutputUrl ? '导出完成，已开始下载' : '预览完成'}
+                </Badge>
+              </p>
+            )}
+            {danceError && <p className="form-error">{danceError}</p>}
+
+            <div className="mode-select studio-actions dance-actions">
+              <button
+                className="btn btn-sm"
+                disabled={danceBusy}
+                onClick={() => danceInputRef.current?.click()}
+              >
+                {danceInfo ? '更换真人视频' : '导入真人视频'}
+              </button>
+              <button
+                className="btn btn-sm"
+                disabled={!danceInfo || danceBusy || cameraActive}
+                onClick={() => void startDanceRun('preview')}
+              >
+                预览复现
+              </button>
+              <button
+                className="btn btn-sm btn-primary"
+                disabled={!danceInfo || danceBusy || cameraActive}
+                onClick={() => void startDanceRun('record')}
+              >
+                导出数字人视频
+              </button>
+              {danceBusy && (
+                <button className="btn btn-sm btn-danger" onClick={cancelDanceRun}>
+                  停止
+                </button>
+              )}
+              {danceOutputUrl && (
+                <a className="btn btn-sm" href={danceOutputUrl} download={danceOutputName}>
+                  再次下载 WebM
+                </a>
+              )}
+            </div>
+            <p className="muted">
+              导出内容是当前直播房间、当前人物站位与机位的最终画面；录制过程中仍可切换导播
+              机位。浏览器支持时保留原视频声音，否则输出无声 WebM。
+            </p>
+            <p className="muted">
+              建议使用固定机位、均匀光照、头手脚完整入镜且遮挡较少的正面或 45° 舞蹈视频。
+            </p>
           </section>
 
           <section>
@@ -949,7 +1702,7 @@ export function MotionPage() {
                 </p>
                 <p className="muted">
                   {trackingMode === 'full'
-                    ? '全身模式：需距离摄像头 2–3 米，头、手、脚完整入镜。'
+                    ? '全身模式：需距离摄像头 2–3 米，头、手、脚完整入镜；支持蹲起重心下降和脚底锁定。'
                     : '上半身模式：只需肩到手腕入镜，可坐近使用；髋关节和双腿不被驱动，保持当前姿态。'}
                 </p>
                 <p className="muted">
@@ -958,8 +1711,14 @@ export function MotionPage() {
                 </p>
                 <button
                   className="btn btn-primary"
-                  disabled={stance !== 'standing'}
-                  title={stance !== 'standing' ? '请先完成站起动作' : undefined}
+                  disabled={stance !== 'standing' || danceBusy}
+                  title={
+                    danceBusy
+                      ? '请先停止真人视频复现'
+                      : stance !== 'standing'
+                        ? '请先完成站起动作'
+                        : undefined
+                  }
                   onClick={() => void startCamera()}
                 >
                   启动摄像头驱动

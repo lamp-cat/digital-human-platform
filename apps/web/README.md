@@ -35,7 +35,7 @@ npm run build --workspace apps/web       # vite build
 | `/import` | 导入六步向导：选择文件 → 权属确认 → 上传（进度/取消）→ 校验 → 报告（FULL/POSE_ONLY/REJECTED 徽章 + 逐项检查 + ≤3 条修复建议）→ 预览激活 |
 | `/editor/:id` | 三维编辑器：左侧分类（脸部/体型/肤色/穿搭）、中间三维视窗、右侧参数面板；撤销/重做、乐观锁保存（409 冲突弹窗）、封面快照上传 |
 | `/avatars` | 我的数字人：封面卡片、编辑/动作/复制/删除 |
-| `/motion/:id` | 虚拟直播间：3D 房间导入、5 个内置/自定义机位、人物站位、8 组骨架动作、摄像头姿态驱动、478 点面捕与 24 FPS 双手追踪 |
+| `/motion/:id` | 虚拟直播间：3D 房间导入、5 个内置/自定义机位、人物站位、8 组骨架动作、摄像头姿态驱动、真人舞蹈视频复现与 WebM 导出、478 点面捕与 24 FPS 双手追踪 |
 | `/admin` | 管理后台（仅 admin）：资产筛选列表、发布/下架、manifest 校验任务 |
 
 ## 关键约定
@@ -44,6 +44,8 @@ npm run build --workspace apps/web       # vite build
 - **换装事务**：编辑器点穿搭卡片时先经 `AvatarPackage.wearTrait()`（内部调 schema `checkWearable()`）校验并预构建，成功才写入文档 store；失败 toast 结构化原因，场景与文档均不变。
 - **导入人物能力分级**：`assetSource.type === 'imported'` 时，编辑器只显示导入 manifest 声明的可编辑参数（`editableProfile`）；`POSE_ONLY` 隐藏换装面板并显示「可动作控制，不支持 V1 通用换装」。
 - **摄像头隐私**：视频与关键点完全在浏览器本地处理（MediaPipe wasm 本地加载），不上传任何帧。
+- **真人视频复现**：导入本地视频后先跨时间轴粗扫，再围绕最清晰的完整人体帧精细标定；播放阶段以媒体时间戳同步身体和双手识别，源视频不镜像。Three.js 最终画布由 `MediaRecorder` 录成 WebM，录制中可切换机位。
+- **全身蹲起**：全身模式用髋中点到支撑脚踝的垂直距离估算重心高度，Hips 根位移配合腿部绝对旋转实现脚底锁定；站姿死区、One Euro 和速度限制抑制上下抽动。仅上半身模式不写 Hips 旋转或位移。
 - **直播间导入**：默认加载 Kenney CC0 家具直播间；本地支持 GLB、嵌入式 glTF、FBX 和 OBJ，模型完成解析与边界检查后才替换当前房间。
 - **骨架动作抗抖**：导入人物的动画按 StandardRig 父链世界旋转增量和模型绑定姿态重定向；坐下/站起共用严格互逆关键帧，单次播放保持末帧，动作切换使用 0.35 秒交叉淡化。
 - **面部表情追踪**：Face Landmarker（单脸 478 点 + 52 blendshape）→ 中性脸中位数标定 → 偏置/死区消除 → One Euro 平滑 → VRM 1.0 Expression、VRM 0.x BlendShapeGroup 或普通 GLB Morph。面部丢失后先短暂保持，再平滑回中性。

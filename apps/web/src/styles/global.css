@@ -1869,6 +1869,15 @@ img.cover {
   background: #ff4d5e;
   box-shadow: 0 0 8px rgba(255, 77, 94, 0.8);
 }
+.studio-live-dot.recording {
+  animation: studio-recording-pulse 1.1s ease-in-out infinite;
+}
+@keyframes studio-recording-pulse {
+  50% {
+    opacity: 0.35;
+    transform: scale(0.78);
+  }
+}
 .studio-camera-name {
   padding-left: 7px;
   border-left: 1px solid rgba(255, 255, 255, 0.2);
@@ -1891,6 +1900,63 @@ img.cover {
 }
 .cam-preview.active {
   display: block;
+}
+.dance-video-preview {
+  position: absolute;
+  right: var(--sp-3);
+  top: var(--sp-3);
+  width: min(220px, 28%);
+  max-height: 180px;
+  object-fit: contain;
+  border-radius: 10px;
+  border: 1px solid rgba(103, 183, 255, 0.5);
+  box-shadow: var(--shadow-pop);
+  background: #000;
+  display: none;
+  z-index: 6;
+}
+.dance-video-preview.active {
+  display: block;
+}
+.dance-source-label {
+  position: absolute;
+  right: var(--sp-3);
+  top: calc(var(--sp-3) + 186px);
+  z-index: 6;
+  padding: 4px 8px;
+  border-radius: var(--r-pill);
+  background: rgba(8, 12, 22, 0.78);
+  color: rgba(255, 255, 255, 0.72);
+  font-size: 10px;
+  pointer-events: none;
+}
+.dance-file-card {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+  margin-bottom: var(--sp-3);
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  background: var(--bg-2);
+}
+.dance-file-card strong {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-1);
+}
+.dance-progress-meta {
+  display: flex;
+  justify-content: space-between;
+  gap: var(--sp-3);
+  margin: 8px 0 6px;
+  color: var(--text-1);
+  font-size: var(--fs-sm);
+}
+.dance-actions {
+  margin-top: var(--sp-3);
 }
 .calib-panel {
   position: absolute;

@@ -25,6 +25,11 @@ export interface HandTrackerOptions {
   startDelayMs?: number;
   /** 与姿态追踪共用的视频元素（必须已在播放） */
   video: HTMLVideoElement;
+  /**
+   * 输出帧时间戳来源。摄像头默认 performance；本地视频应使用 video，
+   * 使手部与姿态帧共享同一条媒体时间线。
+   */
+  frameTimestampSource?: 'performance' | 'video';
   onFrame: (frame: HandFrame) => void;
   onError?: (err: Error) => void;
 }
@@ -128,7 +133,11 @@ export class HandTracker {
 
     try {
       const result = this.landmarker!.detectForVideo(video, now);
-      this.opts.onFrame(handResultToHandFrame(result, now));
+      const frameTimestampMs =
+        this.opts.frameTimestampSource === 'video'
+          ? Math.round(video.currentTime * 1000)
+          : now;
+      this.opts.onFrame(handResultToHandFrame(result, frameTimestampMs));
     } catch (err) {
       this.opts.onError?.(err instanceof Error ? err : new Error(String(err)));
     }
