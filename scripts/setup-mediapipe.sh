@@ -9,6 +9,7 @@ WASM_SRC="$ROOT_DIR/node_modules/@mediapipe/tasks-vision/wasm"
 MODEL_URL="https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_full/float16/latest/pose_landmarker_full.task"
 MODEL_HEAVY_URL="https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_heavy/float16/latest/pose_landmarker_heavy.task"
 HAND_MODEL_URL="https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/latest/hand_landmarker.task"
+FACE_MODEL_URL="https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/latest/face_landmarker.task"
 
 mkdir -p "$TARGET_DIR"
 
@@ -32,6 +33,14 @@ if [ -s "$TARGET_DIR/hand_landmarker.task" ]; then
 else
   echo "[下载] $HAND_MODEL_URL"
   curl -fSL --retry 3 -o "$TARGET_DIR/hand_landmarker.task" "$HAND_MODEL_URL"
+fi
+
+# 1c. 面部模型（478 点 + 52 blendshape，约 3.8MB）
+if [ -s "$TARGET_DIR/face_landmarker.task" ]; then
+  echo "[skip] face_landmarker.task 已存在"
+else
+  echo "[下载] $FACE_MODEL_URL"
+  curl -fSL --retry 3 -o "$TARGET_DIR/face_landmarker.task" "$FACE_MODEL_URL"
 fi
 
 # 2. wasm 运行时（从 npm 包拷贝，约 32MB）

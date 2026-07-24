@@ -7,7 +7,7 @@ version: "3.9"
 services:
   api:
     build:
-      context: ..
+      context: ../..
       dockerfile: infra/docker/api.Dockerfile
     environment:
       APP_ENV: prod
@@ -30,7 +30,7 @@ services:
 
   web:
     build:
-      context: ..
+      context: ../..
       dockerfile: infra/docker/web.Dockerfile
 
   nginx:

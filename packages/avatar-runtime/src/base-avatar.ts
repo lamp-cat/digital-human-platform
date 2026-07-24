@@ -33,8 +33,11 @@ export interface BaseAvatar {
   headMesh: SkinnedMesh;
   /** 贴在 Head 骨骼上的眼球。 */
   eyeMeshes: { left: Mesh; right: Mesh };
+  /** 内置底模的简化嘴部，用于实时口型反馈。 */
+  mouthMesh: Mesh;
   bodyMaterial: MeshStandardMaterial;
   eyeMaterial: MeshStandardMaterial;
+  mouthMaterial: MeshStandardMaterial;
 }
 
 /** 每个分区刚性绑定的骨骼。 */
@@ -188,6 +191,15 @@ export function createBaseAvatar(): BaseAvatar {
   rightEye.position.set(-0.042, 0.085, 0.1);
   bones.Head.add(leftEye, rightEye);
 
+  // 简化嘴部：中性时为细椭圆；面捕通过缩放表达张嘴/圆唇/微笑。
+  const mouthMaterial = new MeshStandardMaterial({ color: '#4b1f25', roughness: 0.48, metalness: 0 });
+  const mouthGeo = new SphereGeometry(0.026, 20, 12);
+  mouthGeo.scale(1.2, 0.25, 0.2);
+  const mouth = new Mesh(mouthGeo, mouthMaterial);
+  mouth.name = 'mouth';
+  mouth.position.set(0, 0.025, 0.112);
+  bones.Head.add(mouth);
+
   return {
     root,
     bones,
@@ -195,7 +207,9 @@ export function createBaseAvatar(): BaseAvatar {
     sections,
     headMesh: sections.body_head,
     eyeMeshes: { left: leftEye, right: rightEye },
+    mouthMesh: mouth,
     bodyMaterial,
     eyeMaterial,
+    mouthMaterial,
   };
 }

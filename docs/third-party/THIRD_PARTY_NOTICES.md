@@ -7,6 +7,7 @@
 | @mediapipe/tasks-vision | ^0.10 | 浏览器端人体姿态关键点（Pose Landmarker） | Apache-2.0 | https://github.com/google-ai-edge/mediapipe |
 | Pose Landmarker 模型 | float16 latest | 端侧姿态估计模型（本地打包，不上传视频/关键点） | 遵循 MediaPipe 模型条款 | https://storage.googleapis.com/mediapipe-models/ |
 | Hand Landmarker 模型 | float16 latest | 端侧手部关键点估计模型（21 点 × 双手，本地打包；动作模式"手部追踪"实验性功能） | Apache-2.0 | https://storage.googleapis.com/mediapipe-models/ |
+| Face Landmarker 模型 | float16 latest | 端侧单人面部关键点与 52 项 blendshape 估计（本地打包，不上传视频/关键点） | Apache-2.0 | https://storage.googleapis.com/mediapipe-models/ |
 | Seed-san（VRM 样例人物） | — | 演示/样例角色（`assets/base-avatars/samples/Seed-san.vrm`） | VRM Public License 1.0（VirtualCast, Inc.） | https://github.com/madjin/vrm-samples |
 | AvatarSample_A（VRM 样例人物） | — | 演示/样例美少女角色（`assets/base-avatars/samples/AvatarSample_A.vrm`） | VRoid 样例模型使用条款 | https://github.com/madjin/vrm-samples |
 | React / React DOM | ^18 | 前端 UI | MIT | https://github.com/facebook/react |

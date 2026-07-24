@@ -1823,6 +1823,10 @@ img.cover {
   gap: var(--sp-2);
   margin-bottom: var(--sp-3);
 }
+.face-actions {
+  margin-top: var(--sp-3);
+  flex-wrap: wrap;
+}
 .cam-preview {
   position: absolute;
   right: var(--sp-3);

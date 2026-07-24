@@ -1,5 +1,6 @@
 FROM node:20-alpine AS build
 WORKDIR /srv
+RUN apk add --no-cache bash curl
 COPY package.json package-lock.json ./
 COPY apps/web/package.json apps/web/package.json
 COPY packages/avatar-schema/package.json packages/avatar-schema/package.json
@@ -7,6 +8,8 @@ COPY packages/avatar-runtime/package.json packages/avatar-runtime/package.json
 COPY packages/rig-mapping/package.json packages/rig-mapping/package.json
 COPY packages/vision-runtime/package.json packages/vision-runtime/package.json
 RUN npm ci --no-audit --no-fund
+COPY scripts/setup-mediapipe.sh scripts/setup-mediapipe.sh
+RUN bash scripts/setup-mediapipe.sh
 COPY packages ./packages
 COPY apps/web ./apps/web
 RUN npm run build --workspace apps/web

@@ -35,7 +35,7 @@ npm run build --workspace apps/web       # vite build
 | `/import` | 导入六步向导：选择文件 → 权属确认 → 上传（进度/取消）→ 校验 → 报告（FULL/POSE_ONLY/REJECTED 徽章 + 逐项检查 + ≤3 条修复建议）→ 预览激活 |
 | `/editor/:id` | 三维编辑器：左侧分类（脸部/体型/肤色/穿搭）、中间三维视窗、右侧参数面板；撤销/重做、乐观锁保存（409 冲突弹窗）、封面快照上传 |
 | `/avatars` | 我的数字人：封面卡片、编辑/动作/复制/删除 |
-| `/motion/:id` | 动作模式：预置动作（待机/挥手/走路）+ 摄像头姿态驱动（校准 2.5s → 实时驱动 → 丢失回退）+ 手部追踪（实验性开关：手掌朝向 + 五指屈伸，需 VRM 模型带手指骨骼） |
+| `/motion/:id` | 动作模式：预置动作 + 摄像头姿态驱动 + 478 点面部表情追踪 + 24 FPS 双手追踪（手掌朝向与五指屈伸） |
 | `/admin` | 管理后台（仅 admin）：资产筛选列表、发布/下架、manifest 校验任务 |
 
 ## 关键约定
@@ -44,7 +44,8 @@ npm run build --workspace apps/web       # vite build
 - **换装事务**：编辑器点穿搭卡片时先经 `AvatarPackage.wearTrait()`（内部调 schema `checkWearable()`）校验并预构建，成功才写入文档 store；失败 toast 结构化原因，场景与文档均不变。
 - **导入人物能力分级**：`assetSource.type === 'imported'` 时，编辑器只显示导入 manifest 声明的可编辑参数（`editableProfile`）；`POSE_ONLY` 隐藏换装面板并显示「可动作控制，不支持 V1 通用换装」。
 - **摄像头隐私**：视频与关键点完全在浏览器本地处理（MediaPipe wasm 本地加载），不上传任何帧。
-- **手部追踪（实验性）**：动作模式面板中的开关（默认关）。Hand Landmarker（21 点 × 双手）→ `hand-mapper` 手掌坐标系 + 手指屈伸映射 → 手指扩展骨骼（VRM 命名 30 根，仅 rigMap 中存在的骨骼生效）。handedness 按官方文档对未镜像前置画面做一次左右交换，保持解剖学对应。内置底模无手指骨骼时仅手掌朝向生效。
+- **面部表情追踪**：Face Landmarker（单脸 478 点 + 52 blendshape）→ 中性脸中位数标定 → 偏置/死区消除 → One Euro 平滑 → VRM 1.0 Expression、VRM 0.x BlendShapeGroup 或普通 GLB Morph。面部丢失后先短暂保持，再平滑回中性。
+- **手部追踪（实验性）**：动作模式面板中的开关（默认关）。Hand Landmarker（21 点 × 双手，24 FPS）→ 左右手时序身份稳定 → 关键点滤波 → 手掌/手指映射 → 四元数平滑与异常角速度限制 → VRM 手指扩展骨骼。handedness 保持解剖学对应；内置底模无手指骨骼时仅手掌朝向生效。
 
 ## 动作识别调试（/pose-lab 隐藏路由）
 
@@ -68,6 +69,7 @@ node scripts/pose-video-lab.mjs            # playwright + 本机 Chrome，报告
 - `pose_landmarker_full.task`（约 9MB，流畅档姿态模型）
 - `pose_landmarker_heavy.task`（约 29MB，精准档姿态模型，动作模式默认档）
 - `hand_landmarker.task`（约 7.8MB，手部追踪模型，实验性）
+- `face_landmarker.task`（约 3.8MB，478 点与 52 项表情系数）
 - `wasm/`（约 32MB，从 `node_modules/@mediapipe/tasks-vision/wasm` 拷贝）
 
 `FilesetResolver.forVisionTasks('/mediapipe/wasm')` 指向本地路径，比赛现场可完全离线运行。

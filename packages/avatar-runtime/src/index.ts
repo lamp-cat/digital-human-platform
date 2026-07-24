@@ -5,6 +5,7 @@ export * from './profile-apply.js';
 export * from './garments.js';
 export * from './animations.js';
 export * from './rig-driver.js';
+export * from './expression-driver.js';
 export * from './imported.js';
 export * from './stage.js';
 export * from './avatar-package.js';

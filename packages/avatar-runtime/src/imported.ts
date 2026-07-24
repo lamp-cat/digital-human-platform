@@ -7,6 +7,7 @@ import {
   VRM_FINGER_TO_RIG,
   VRM_HUMANOID_TO_RIG,
   type ExtendedRigBone,
+  type FaceExpressionName,
   type StandardRigBone,
 } from '@dhp/avatar-schema';
 import { createRigDriver, type RigDriver } from './rig-driver.js';
@@ -24,6 +25,15 @@ export interface ImportedAvatar {
   /** 第一个 SkinnedMesh 的骨架（存在时）。 */
   skeleton: Skeleton | null;
   vrm?: VRM;
+  /** VRM 0.x BlendShapeGroup → 实际 morph target 绑定。 */
+  legacyExpressionGroups?: Map<FaceExpressionName, MorphTargetBinding[]>;
+}
+
+export interface MorphTargetBinding {
+  mesh: Object3D & { morphTargetInfluences?: number[] };
+  index: number;
+  /** VRM 0.x bind weight 为 0–100，进入此结构时已归一化到 0–1。 */
+  scale: number;
 }
 
 /** mixamo 常见命名 → StandardRig（显式映射，不靠猜测）。 */
@@ -133,6 +143,105 @@ export function collectGltfNodesByIndex(gltf: GLTF): (Object3D | undefined)[] {
   return nodes;
 }
 
+const VRM0_EXPRESSION_PRESETS: Record<string, FaceExpressionName> = {
+  a: 'aa',
+  aa: 'aa',
+  i: 'ih',
+  ih: 'ih',
+  e: 'ee',
+  ee: 'ee',
+  o: 'oh',
+  oh: 'oh',
+  u: 'ou',
+  ou: 'ou',
+  blink: 'blink',
+  blink_l: 'blinkLeft',
+  blinkleft: 'blinkLeft',
+  blink_r: 'blinkRight',
+  blinkright: 'blinkRight',
+  joy: 'happy',
+  happy: 'happy',
+  angry: 'angry',
+  sorrow: 'sad',
+  sad: 'sad',
+  fun: 'relaxed',
+  relaxed: 'relaxed',
+  surprised: 'surprised',
+  surprise: 'surprised',
+  lookup: 'lookUp',
+  lookdown: 'lookDown',
+  lookleft: 'lookLeft',
+  lookright: 'lookRight',
+};
+
+function normalizeExpressionName(name: string): string {
+  return name.toLowerCase().replace(/[\s.-]+/g, '_');
+}
+
+/**
+ * 解析 VRM 0.x `blendShapeMaster.blendShapeGroups`。
+ * bind.mesh 指 glTF mesh 索引；通过 GLTFLoader associations 找到实际场景对象。
+ */
+export function extractVrm0ExpressionGroups(
+  gltf: GLTF,
+): Map<FaceExpressionName, MorphTargetBinding[]> {
+  const result = new Map<FaceExpressionName, MorphTargetBinding[]>();
+  const meshObjects = new Map<number, (Object3D & { morphTargetInfluences?: number[] })[]>();
+  gltf.scene.traverse((obj) => {
+    const meshIndex = gltf.parser.associations.get(obj)?.meshes;
+    const morph = obj as Object3D & { morphTargetInfluences?: number[] };
+    if (typeof meshIndex !== 'number' || !morph.morphTargetInfluences) return;
+    const list = meshObjects.get(meshIndex) ?? [];
+    list.push(morph);
+    meshObjects.set(meshIndex, list);
+  });
+
+  const groups = (gltf.parser.json as {
+    extensions?: {
+      VRM?: {
+        blendShapeMaster?: {
+          blendShapeGroups?: unknown;
+        };
+      };
+    };
+  })?.extensions?.VRM?.blendShapeMaster?.blendShapeGroups;
+  if (!Array.isArray(groups)) return result;
+
+  for (const raw of groups) {
+    const group = raw as {
+      name?: unknown;
+      presetName?: unknown;
+      binds?: unknown;
+    };
+    const candidates = [group.presetName, group.name].filter((value): value is string => typeof value === 'string');
+    let expression: FaceExpressionName | undefined;
+    for (const candidate of candidates) {
+      expression = VRM0_EXPRESSION_PRESETS[normalizeExpressionName(candidate)];
+      if (expression) break;
+    }
+    if (!expression || !Array.isArray(group.binds)) continue;
+    const bindings = result.get(expression) ?? [];
+    for (const rawBind of group.binds) {
+      const bind = rawBind as { mesh?: unknown; index?: unknown; weight?: unknown };
+      if (typeof bind.mesh !== 'number' || typeof bind.index !== 'number') continue;
+      for (const mesh of meshObjects.get(bind.mesh) ?? []) {
+        if (
+          bind.index < 0 ||
+          !mesh.morphTargetInfluences ||
+          bind.index >= mesh.morphTargetInfluences.length
+        ) continue;
+        bindings.push({
+          mesh,
+          index: bind.index,
+          scale: Math.min(1, Math.max(0, typeof bind.weight === 'number' ? bind.weight / 100 : 1)),
+        });
+      }
+    }
+    if (bindings.length > 0) result.set(expression, bindings);
+  }
+  return result;
+}
+
 /**
  * VRM 0.x 坐标约定：角色面向 -Z（1.0 为面向 +Z，平台约定同 1.0）。
  * 实测样例（VRoid 官方 AvatarSample_A）：脚尖世界坐标在脚踝 -Z 侧，即背对相机。
@@ -215,11 +324,13 @@ export async function loadImportedAvatarFromBuffer(
 
   const rigMap = new Map<ExtendedRigBone, Object3D>();
   let vrm: VRM | undefined;
+  let legacyExpressionGroups: Map<FaceExpressionName, MorphTargetBinding[]> | undefined;
   if (isVrm0) {
     // VRM 0.x：手动从 extensions.VRM.humanoid.humanBones 建映射（含手指）
     const nodes = collectGltfNodesByIndex(gltf);
     const mapped = extractVrm0RigMap(gltf.parser.json, nodes);
     for (const [bone, node] of mapped) rigMap.set(bone, node);
+    legacyExpressionGroups = extractVrm0ExpressionGroups(gltf);
     correctVrm0Facing(root, rigMap);
   } else if (isVrm1) {
     vrm = gltf.userData.vrm as VRM | undefined;
@@ -248,7 +359,15 @@ export async function loadImportedAvatarFromBuffer(
   });
 
   const driver = createRigDriver(rigMap, root);
-  return { kind: isVrm ? 'vrm' : 'glb', root, rigMap, driver, skeleton, vrm };
+  return {
+    kind: isVrm ? 'vrm' : 'glb',
+    root,
+    rigMap,
+    driver,
+    skeleton,
+    vrm,
+    legacyExpressionGroups,
+  };
 }
 
 /**

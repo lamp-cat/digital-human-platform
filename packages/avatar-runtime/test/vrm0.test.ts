@@ -6,6 +6,7 @@ import { VRM_FINGER_TO_RIG, VRM_HUMANOID_TO_RIG, type StandardRigBone } from '@d
 import {
   collectGltfNodesByIndex,
   correctVrm0Facing,
+  extractVrm0ExpressionGroups,
   extractVrm0RigMap,
   readGlbJson,
 } from '../src/imported.js';
@@ -163,5 +164,17 @@ describe('VRM 0.x 完整加载链路（GLTFLoader.parse，无 VRMLoaderPlugin）
     const foot = rigMap.get('LeftFoot')!.getWorldPosition(new Vector3());
     const toes = rigMap.get('LeftToes')!.getWorldPosition(new Vector3());
     expect(toes.z).toBeGreaterThan(foot.z);
+  });
+
+  it('AvatarSample_A 的 VRM 0.x BlendShapeGroup 映射到标准表情', async () => {
+    const gltf = await parseGltf(stripTextures(readFile(SAMPLE_A_URL)));
+    const groups = extractVrm0ExpressionGroups(gltf);
+    for (const expression of ['aa', 'ih', 'ee', 'oh', 'ou', 'blink', 'happy', 'sad', 'surprised'] as const) {
+      expect(groups.get(expression)?.length, expression).toBeGreaterThan(0);
+    }
+    const blink = groups.get('blink')![0];
+    expect(blink.index).toBeGreaterThanOrEqual(0);
+    expect(blink.scale).toBeGreaterThan(0);
+    expect(blink.mesh.morphTargetInfluences).toBeDefined();
   });
 });

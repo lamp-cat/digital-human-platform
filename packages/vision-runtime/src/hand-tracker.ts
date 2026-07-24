@@ -19,7 +19,7 @@ export interface HandTrackerOptions {
   minHandDetectionConfidence?: number;
   minHandPresenceConfidence?: number;
   minTrackingConfidence?: number;
-  /** 推理帧率上限，默认 18（低于姿态，避免拖累主驱动帧率） */
+  /** 推理帧率上限，默认 24（兼顾手指快速动作与主线程负载） */
   targetFps?: number;
   /** 首帧推理延迟（ms），用于与姿态推理错峰，默认 28 */
   startDelayMs?: number;
@@ -101,9 +101,10 @@ export class HandTracker {
         },
         runningMode: 'VIDEO',
         numHands: this.opts.numHands ?? 2,
-        minHandDetectionConfidence: this.opts.minHandDetectionConfidence ?? 0.5,
-        minHandPresenceConfidence: this.opts.minHandPresenceConfidence ?? 0.5,
-        minTrackingConfidence: this.opts.minTrackingConfidence ?? 0.5,
+        minHandDetectionConfidence: this.opts.minHandDetectionConfidence ?? 0.6,
+        minHandPresenceConfidence: this.opts.minHandPresenceConfidence ?? 0.55,
+        // 更高 IoU 阈值会在快速移动/遮挡后更早重新触发掌检测，减少漂移。
+        minTrackingConfidence: this.opts.minTrackingConfidence ?? 0.6,
       });
       this.running = true;
       this.lastInferMs = 0;
@@ -123,7 +124,7 @@ export class HandTracker {
     this.rafId = requestAnimationFrame(this.loop);
     const now = performance.now();
     if (now < this.notBeforeMs) return; // 与姿态推理错峰
-    const interval = 1000 / (this.opts.targetFps ?? 18);
+    const interval = 1000 / (this.opts.targetFps ?? 24);
     if (now - this.lastInferMs < interval) return;
     const video = this.opts.video;
     if (!video || video.readyState < 2 || video.currentTime === this.lastVideoTime) return;

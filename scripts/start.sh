@@ -21,7 +21,8 @@ if [ ! -d "$ROOT/node_modules" ]; then
 fi
 
 # 2. 姿态模型本地化（已存在则跳过）
-if [ ! -f "$ROOT/apps/web/public/mediapipe/pose_landmarker_full.task" ]; then
+if [ ! -f "$ROOT/apps/web/public/mediapipe/pose_landmarker_full.task" ] || \
+   [ ! -f "$ROOT/apps/web/public/mediapipe/face_landmarker.task" ]; then
   echo "==> 下载浏览器端姿态模型..."
   bash "$ROOT/scripts/setup-mediapipe.sh"
 fi

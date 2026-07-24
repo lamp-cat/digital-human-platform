@@ -19,6 +19,7 @@ import {
   type AvatarProfile,
   type BodySection,
   type ExtendedRigBone,
+  type FaceExpressionWeights,
   type GarmentManifest,
   type StandardRigBone,
   type Traits,
@@ -31,6 +32,11 @@ import { createPresetClips, retargetClip, type PresetAnimationId } from './anima
 import { applyBoneRotations, createRigDriver, type QuatLike, type RigDriver } from './rig-driver.js';
 import type { ImportedAvatar } from './imported.js';
 import type { BoneMap } from './skeleton.js';
+import {
+  createBaseExpressionDriver,
+  createImportedExpressionDriver,
+  type ExpressionDriver,
+} from './expression-driver.js';
 
 export interface AvatarPackageOptions {
   profile: AvatarProfile;
@@ -79,6 +85,7 @@ export class AvatarPackage {
   private base: BaseAvatar | null = null;
   private imported: ImportedAvatar | null = null;
   private driver: RigDriver;
+  private expressionDriver: ExpressionDriver;
   private profile: AvatarProfile;
   private knownGarments: Map<string, GarmentManifest>;
   private importCompatibleGarments: string[] | null;
@@ -102,6 +109,7 @@ export class AvatarPackage {
       this.imported = opts.imported;
       this.root.add(opts.imported.root);
       this.driver = opts.imported.driver;
+      this.expressionDriver = createImportedExpressionDriver(opts.imported);
       // 预置动作重定向到实际骨骼名（预置动作只含 22 根最小骨架，手指骨骼跳过）
       const nameMap = new Map<StandardRigBone, string>();
       for (const [bone, node] of opts.imported.rigMap) {
@@ -118,6 +126,7 @@ export class AvatarPackage {
       );
       this.root.updateMatrixWorld(true);
       this.driver = createRigDriver(boneMap, this.root);
+      this.expressionDriver = createBaseExpressionDriver(this.base);
       for (const [id, clip] of createPresetClips()) this.clips.set(id, clip);
     }
     this.mixer = new AnimationMixer(this.root);
@@ -254,6 +263,19 @@ export class AvatarPackage {
     applyBoneRotations(this.driver, rotations);
   }
 
+  /** 摄像头面部驱动：写入 VRM/GLB morph 或内置底模的简化表情。 */
+  applyFaceExpressions(expressions: FaceExpressionWeights): void {
+    this.expressionDriver.apply(expressions);
+  }
+
+  resetFaceExpressions(): void {
+    this.expressionDriver.reset();
+  }
+
+  getSupportedFaceExpressions(): ReadonlySet<string> {
+    return this.expressionDriver.supported;
+  }
+
   getDriver(): RigDriver {
     return this.driver;
   }
@@ -261,6 +283,7 @@ export class AvatarPackage {
   /** 每帧推进（动画混合与回位插值）。 */
   update(dt: number): void {
     this.mixer.update(dt);
+    this.imported?.vrm?.update(dt);
     if (this.restoreT >= 0) {
       this.restoreT = Math.min(1, this.restoreT + dt / 0.25);
       const t = this.restoreT;
@@ -278,6 +301,7 @@ export class AvatarPackage {
 
   /** 释放几何、材质与动画资源。 */
   dispose(): void {
+    this.expressionDriver.reset();
     this.mixer.stopAllAction();
     this.mixer.uncacheRoot(this.root);
     for (const id of [...this.worn.keys()]) this.removeWorn(id);

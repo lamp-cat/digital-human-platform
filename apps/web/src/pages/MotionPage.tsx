@@ -4,6 +4,7 @@ import {
   FINGER_EXTENSION_BONES,
   garmentManifestSchema,
   type ExtendedRigBone,
+  type FaceFrame,
   type GarmentManifest,
   type HandFrame,
   type PoseFrame,
@@ -11,7 +12,10 @@ import {
 } from '@dhp/avatar-schema';
 import {
   HandDriveManager,
+  HandFrameStabilizer,
   HandFrameSmoother,
+  FaceDriveManager,
+  type FaceTrackingStatus,
   LandmarkSmoother,
   TrackingLossManager,
   mapPoseFrameToBoneRotations,
@@ -21,6 +25,7 @@ import {
 import {
   CalibrationSession,
   CameraPoseTracker,
+  FaceTracker,
   HandTracker,
   type CalibrationSessionState,
 } from '@dhp/vision-runtime';
@@ -65,9 +70,15 @@ export function MotionPage() {
   const trackingModeRef = useRef<PoseTrackingMode>('full');
   // 手部追踪（实验性，默认关）
   const handTrackerRef = useRef<HandTracker | null>(null);
+  const handStabilizerRef = useRef(new HandFrameStabilizer());
   const handSmootherRef = useRef(new HandFrameSmoother({ minCutoff: 2.0, beta: 0.5 }));
   const handDriveRef = useRef(new HandDriveManager());
   const handEnabledRef = useRef(false);
+  // 面部追踪（摄像头驱动成功后自动开启）
+  const faceTrackerRef = useRef<FaceTracker | null>(null);
+  const faceDriveRef = useRef(new FaceDriveManager());
+  const faceEnabledRef = useRef(false);
+  const faceAutoStartedRef = useRef(false);
   const rigBonesRef = useRef<ReadonlySet<string> | null>(null);
 
   const [avatarName, setAvatarName] = useState('');
@@ -82,6 +93,10 @@ export function MotionPage() {
   const [handEnabled, setHandEnabled] = useState(false);
   const [handPresence, setHandPresence] = useState<HandPresence>('none');
   const [fingerSupport, setFingerSupport] = useState<boolean | null>(null);
+  const [faceEnabled, setFaceEnabled] = useState(false);
+  const [faceStatus, setFaceStatus] = useState<FaceTrackingStatus | 'off' | 'loading' | 'error'>('off');
+  const [faceCalibrationProgress, setFaceCalibrationProgress] = useState(0);
+  const [faceSupport, setFaceSupport] = useState<number | null>(null);
 
   const setTrackingMode = (mode: PoseTrackingMode) => {
     trackingModeRef.current = mode;
@@ -130,13 +145,25 @@ export function MotionPage() {
   // ---------- 手部帧处理（HandTracker 回调） ----------
   const handleHandFrame = useCallback((frame: HandFrame) => {
     if (!handEnabledRef.current) return;
-    const smoothed = handSmootherRef.current.apply(frame);
+    const stabilized = handStabilizerRef.current.apply(frame);
+    const smoothed = handSmootherRef.current.apply(stabilized);
     const rotations = handDriveRef.current.update(smoothed, smoothed.timestampMs);
     controllerRef.current?.pkg?.applyBoneRotations(rotations);
     const left = smoothed.hands.some((h) => h.handedness === 'left' && h.score >= 0.5);
     const right = smoothed.hands.some((h) => h.handedness === 'right' && h.score >= 0.5);
     const next: HandPresence = left && right ? 'both' : left ? 'left' : right ? 'right' : 'none';
     setHandPresence((prev) => (prev === next ? prev : next));
+  }, []);
+
+  // ---------- 面部帧处理（FaceTracker 回调） ----------
+  const handleFaceFrame = useCallback((frame: FaceFrame) => {
+    if (!faceEnabledRef.current) return;
+    const output = faceDriveRef.current.update(frame, frame.timestampMs);
+    controllerRef.current?.pkg?.applyFaceExpressions(output.expressions);
+    setFaceStatus((prev) => (prev === output.status ? prev : output.status));
+    setFaceCalibrationProgress((prev) =>
+      Math.abs(prev - output.calibrationProgress) < 0.01 ? prev : output.calibrationProgress,
+    );
   }, []);
 
   /** 手部骨骼（含 Hand 与已支持的手指）回绑定姿态。 */
@@ -159,6 +186,7 @@ export function MotionPage() {
     setHandEnabled(false);
     setHandPresence('none');
     handDriveRef.current.reset();
+    handStabilizerRef.current.reset();
     handSmootherRef.current.reset();
     resetHandBones(); // 关闭时手指/手掌回绑定姿态
   }, [resetHandBones]);
@@ -168,13 +196,21 @@ export function MotionPage() {
     const bones = controllerRef.current?.pkg?.getDriver().bones;
     if (bones) {
       rigBonesRef.current = new Set(bones.keys());
-      handDriveRef.current = new HandDriveManager({ rigBones: rigBonesRef.current });
+      handDriveRef.current = new HandDriveManager({
+        rigBones: rigBonesRef.current,
+        scoreThreshold: 0.55,
+        temporalSmoothingMs: 45,
+        maxAngularVelocityDegPerSec: 900,
+      });
     }
     const tracker = new HandTracker({
       wasmBasePath: '/mediapipe/wasm',
       video: videoRef.current,
-      targetFps: 18,
+      targetFps: 24,
       startDelayMs: 28, // 与姿态推理错峰，避免同帧争用
+      minHandDetectionConfidence: 0.6,
+      minHandPresenceConfidence: 0.55,
+      minTrackingConfidence: 0.6,
       onFrame: handleHandFrame,
       onError: (e) => setErrorMsg(e.message),
     });
@@ -183,6 +219,7 @@ export function MotionPage() {
       handTrackerRef.current = tracker;
       handEnabledRef.current = true;
       setHandEnabled(true);
+      handStabilizerRef.current.reset();
       handSmootherRef.current.reset();
       handDriveRef.current.reset();
     } catch (err) {
@@ -194,6 +231,63 @@ export function MotionPage() {
     if (handEnabledRef.current) stopHandTracking();
     else void startHandTracking();
   }, [startHandTracking, stopHandTracking]);
+
+  const stopFaceTracking = useCallback(() => {
+    faceTrackerRef.current?.stop();
+    faceTrackerRef.current = null;
+    faceEnabledRef.current = false;
+    setFaceEnabled(false);
+    setFaceStatus('off');
+    setFaceCalibrationProgress(0);
+    faceDriveRef.current.reset();
+    controllerRef.current?.pkg?.resetFaceExpressions();
+  }, []);
+
+  const startFaceTracking = useCallback(async () => {
+    if (faceTrackerRef.current || !videoRef.current || faceSupport === 0) return;
+    setFaceStatus('loading');
+    setErrorMsg('');
+    faceDriveRef.current.recalibrate();
+    faceEnabledRef.current = true;
+    const tracker = new FaceTracker({
+      wasmBasePath: '/mediapipe/wasm',
+      video: videoRef.current,
+      targetFps: 20,
+      startDelayMs: 56,
+      minFaceDetectionConfidence: 0.6,
+      minFacePresenceConfidence: 0.6,
+      minTrackingConfidence: 0.6,
+      onFrame: handleFaceFrame,
+      onError: (e) => {
+        setFaceStatus('error');
+        setErrorMsg(`面部追踪异常：${e.message}`);
+      },
+    });
+    try {
+      await tracker.start();
+      faceTrackerRef.current = tracker;
+      setFaceEnabled(true);
+      setFaceStatus('calibrating');
+      setFaceCalibrationProgress(0);
+    } catch (err) {
+      faceEnabledRef.current = false;
+      setFaceEnabled(false);
+      setFaceStatus('error');
+      setErrorMsg(err instanceof Error ? `面部模型加载失败：${err.message}` : '面部模型加载失败');
+    }
+  }, [faceSupport, handleFaceFrame]);
+
+  const toggleFaceTracking = useCallback(() => {
+    if (faceEnabledRef.current) stopFaceTracking();
+    else void startFaceTracking();
+  }, [startFaceTracking, stopFaceTracking]);
+
+  const recalibrateFace = useCallback(() => {
+    faceDriveRef.current.recalibrate();
+    controllerRef.current?.pkg?.resetFaceExpressions();
+    setFaceStatus('calibrating');
+    setFaceCalibrationProgress(0);
+  }, []);
 
   // ---------- 加载人物 ----------
   const boot = useCallback(
@@ -232,11 +326,17 @@ export function MotionPage() {
         const bones = controller.pkg?.getDriver().bones;
         if (bones) {
           rigBonesRef.current = new Set(bones.keys());
-          handDriveRef.current = new HandDriveManager({ rigBones: rigBonesRef.current });
+          handDriveRef.current = new HandDriveManager({
+            rigBones: rigBonesRef.current,
+            scoreThreshold: 0.55,
+            temporalSmoothingMs: 45,
+            maxAngularVelocityDegPerSec: 900,
+          });
           setFingerSupport(
             (FINGER_EXTENSION_BONES as readonly string[]).some((b) => bones.has(b as ExtendedRigBone)),
           );
         }
+        setFaceSupport(controller.pkg?.getSupportedFaceExpressions().size ?? 0);
         controller.pkg?.playAnimation('idle-01');
         setActiveAnim('idle-01');
       } catch (err) {
@@ -259,10 +359,25 @@ export function MotionPage() {
     return () => {
       handTrackerRef.current?.stop();
       handTrackerRef.current = null;
+      faceTrackerRef.current?.stop();
+      faceTrackerRef.current = null;
       trackerRef.current?.stop();
       trackerRef.current = null;
     };
   }, []);
+
+  // 姿态校准完成后自动开启面捕；避免模型加载与站姿校准争用主线程。
+  useEffect(() => {
+    if (
+      driveState === 'driving' &&
+      !faceAutoStartedRef.current &&
+      !faceEnabledRef.current &&
+      faceStatus !== 'error'
+    ) {
+      faceAutoStartedRef.current = true;
+      void startFaceTracking();
+    }
+  }, [driveState, faceStatus, startFaceTracking]);
 
   // ---------- 预置动作 ----------
   const play = (animId: string) => {
@@ -273,6 +388,7 @@ export function MotionPage() {
   // ---------- 摄像头驱动 ----------
   const startCamera = async () => {
     setErrorMsg('');
+    faceAutoStartedRef.current = false;
     setDrive('starting');
     const mode = trackingModeRef.current;
     try {
@@ -331,6 +447,7 @@ export function MotionPage() {
 
   const stopDriving = () => {
     stopHandTracking();
+    stopFaceTracking();
     trackerRef.current?.stop();
     trackerRef.current = null;
     sessionRef.current = null;
@@ -530,12 +647,59 @@ export function MotionPage() {
           </section>
 
           <section>
+            <h3 className="param-group-title">面部表情追踪</h3>
+            <p className="muted">
+              单人 478 点面部定位与 52 项表情系数，支持独立眨眼、眼球方向、口型和基础情绪。
+              首次开启时请正视镜头并保持自然中性表情约 1 秒。
+            </p>
+            {faceSupport !== null && (
+              <p>
+                {faceSupport > 0 ? (
+                  <Badge kind="success">该人物支持 {faceSupport} 项标准表情</Badge>
+                ) : (
+                  <Badge kind="warning">该模型未提供可驱动的表情 Morph</Badge>
+                )}
+              </p>
+            )}
+            {!cameraActive && <p className="muted">启动摄像头驱动后将自动开启面部追踪。</p>}
+            {faceStatus === 'loading' && <p className="muted">正在加载本地面部模型…</p>}
+            {faceStatus === 'calibrating' && (
+              <>
+                <p>中性脸标定中，请自然注视镜头。</p>
+                <div className="progress-bar">
+                  <div
+                    className="progress-fill"
+                    style={{ width: `${faceCalibrationProgress * 100}%` }}
+                  />
+                </div>
+              </>
+            )}
+            {faceStatus === 'tracking' && <Badge kind="success">面部跟踪正常</Badge>}
+            {faceStatus === 'lost' && <Badge kind="warning">未检测到完整面部</Badge>}
+            {faceStatus === 'error' && <Badge kind="warning">面部追踪异常</Badge>}
+            <div className="mode-select face-actions">
+              <button
+                className={`btn btn-sm ${faceEnabled ? 'btn-primary' : ''}`}
+                disabled={!cameraActive || faceSupport === 0 || faceStatus === 'loading'}
+                onClick={toggleFaceTracking}
+              >
+                {faceEnabled ? '面部追踪：开' : '面部追踪：关'}
+              </button>
+              {faceEnabled && (
+                <button className="btn btn-sm" onClick={recalibrateFace}>
+                  重标中性脸
+                </button>
+              )}
+            </div>
+          </section>
+
+          <section>
             <h3 className="param-group-title">
-              手部追踪 <Badge kind="info">实验性</Badge>
+              高精度手部追踪 <Badge kind="info">实验性</Badge>
             </h3>
             <p className="muted">
-              识别手掌朝向与五指屈伸（需 VRM 模型带手指骨骼；内置底模仅手掌朝向生效）。
-              与全身/上半身模式互不影响。
+              24 FPS 双手 21 点追踪，含左右手时序身份稳定、关键点与旋转双层平滑及异常翻转抑制。
+              五指驱动需要 VRM 模型带手指骨骼；内置底模仅手掌朝向生效。
             </p>
             {fingerSupport !== null && (
               <p>

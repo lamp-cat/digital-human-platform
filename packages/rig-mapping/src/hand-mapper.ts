@@ -32,6 +32,9 @@ export interface MapHandOptions {
   maxThumbCurlDeg?: number;
   /** 允许的过伸角（度，负方向），默认 15 */
   hyperextendDeg?: number;
+  /** 合理掌宽范围（worldLandmarks 米制；回退图像坐标时同样可过滤塌缩坏帧）。 */
+  minPalmSpan?: number;
+  maxPalmSpan?: number;
   /** 只输出该集合内的骨骼（一般为人物 rigMap 键集），缺省不过滤 */
   rigBones?: ReadonlySet<string>;
 }
@@ -109,7 +112,15 @@ function mapOneHand(
   side: Side,
   opts: Required<Omit<MapHandOptions, 'rigBones' | 'scoreThreshold'>>,
 ): { rotations: ExtendedBoneRotationMap; curls: Record<string, number> } {
-  const { visibilityThreshold, maxHandTurnDeg, maxCurlDeg, maxThumbCurlDeg, hyperextendDeg } = opts;
+  const {
+    visibilityThreshold,
+    maxHandTurnDeg,
+    maxCurlDeg,
+    maxThumbCurlDeg,
+    hyperextendDeg,
+    minPalmSpan,
+    maxPalmSpan,
+  } = opts;
   const bind = SIDE_BIND[side];
   const sidePrefix = side === 'left' ? 'Left' : 'Right';
   const point = makePointGetter(hand, visibilityThreshold).get;
@@ -126,6 +137,8 @@ function mapOneHand(
   const fCur = middleMcp.clone().sub(wrist);
   const uCur = pinkyMcp.clone().sub(indexMcp);
   if (fCur.lengthSq() < 1e-12 || uCur.lengthSq() < 1e-12) return { rotations, curls };
+  const palmSpan = uCur.length();
+  if (palmSpan < minPalmSpan || palmSpan > maxPalmSpan) return { rotations, curls };
 
   const cur = palmFrame(fCur, uCur, bind.sign);
   const bindFrame = palmFrame(bind.f.clone(), bind.u.clone(), bind.sign);
@@ -246,6 +259,8 @@ export function mapHandFrameToBoneRotations(
     maxCurlDeg: opts.maxCurlDeg ?? 120,
     maxThumbCurlDeg: opts.maxThumbCurlDeg ?? 100,
     hyperextendDeg: opts.hyperextendDeg ?? 15,
+    minPalmSpan: opts.minPalmSpan ?? 0.018,
+    maxPalmSpan: opts.maxPalmSpan ?? 0.25,
   };
   const allow = (bone: ExtendedRigBone) => !opts.rigBones || opts.rigBones.has(bone);
 
@@ -276,6 +291,12 @@ export interface HandDriveOptions extends MapHandOptions {
   freezeDelayMs?: number;
   /** 回退到放松微屈的混合时长，默认 800ms */
   blendDurationMs?: number;
+  /** 四元数低通时间常数，默认 45ms。 */
+  temporalSmoothingMs?: number;
+  /** 单骨骼最大角速度，默认 900°/s，用于抑制翻转坏帧。 */
+  maxAngularVelocityDegPerSec?: number;
+  /** 小于该角度的抖动保持上一姿态，默认 0.6°。 */
+  rotationDeadbandDeg?: number;
 }
 
 /**
@@ -287,9 +308,14 @@ export interface HandDriveOptions extends MapHandOptions {
 export class HandDriveManager {
   private freezeDelayMs: number;
   private blendDurationMs: number;
-  private states: Record<Side, { lastGood: ExtendedBoneRotationMap; lastGoodMs: number | null }> = {
-    left: { lastGood: {}, lastGoodMs: null },
-    right: { lastGood: {}, lastGoodMs: null },
+  private states: Record<Side, {
+    lastGood: ExtendedBoneRotationMap;
+    lastGoodMs: number | null;
+    lastOutput: ExtendedBoneRotationMap;
+    lastOutputMs: number | null;
+  }> = {
+    left: { lastGood: {}, lastGoodMs: null, lastOutput: {}, lastOutputMs: null },
+    right: { lastGood: {}, lastGoodMs: null, lastOutput: {}, lastOutputMs: null },
   };
 
   constructor(private opts: HandDriveOptions = {}) {
@@ -314,7 +340,7 @@ export class HandDriveManager {
         ) as ExtendedBoneRotationMap;
 
       if (mapped.present[side]) {
-        state.lastGood = sideBones(mapped.rotations);
+        state.lastGood = this.stabilizeRotations(state, sideBones(mapped.rotations), nowMs);
         state.lastGoodMs = nowMs;
         Object.assign(out, state.lastGood);
         continue;
@@ -345,8 +371,64 @@ export class HandDriveManager {
 
   reset(): void {
     this.states = {
-      left: { lastGood: {}, lastGoodMs: null },
-      right: { lastGood: {}, lastGoodMs: null },
+      left: { lastGood: {}, lastGoodMs: null, lastOutput: {}, lastOutputMs: null },
+      right: { lastGood: {}, lastGoodMs: null, lastOutput: {}, lastOutputMs: null },
     };
+  }
+
+  private stabilizeRotations(
+    state: {
+      lastGood: ExtendedBoneRotationMap;
+      lastGoodMs: number | null;
+      lastOutput: ExtendedBoneRotationMap;
+      lastOutputMs: number | null;
+    },
+    target: ExtendedBoneRotationMap,
+    nowMs: number,
+  ): ExtendedBoneRotationMap {
+    if (state.lastOutputMs === null) {
+      state.lastOutput = { ...target };
+      state.lastOutputMs = nowMs;
+      return { ...target };
+    }
+    const dt = Math.max((nowMs - state.lastOutputMs) / 1000, 1 / 120);
+    const tau = Math.max((this.opts.temporalSmoothingMs ?? 45) / 1000, 1e-3);
+    const baseAlpha = 1 - Math.exp(-dt / tau);
+    const maxStep = (this.opts.maxAngularVelocityDegPerSec ?? 900) * DEG * dt;
+    const deadband = (this.opts.rotationDeadbandDeg ?? 0.6) * DEG;
+    const output: ExtendedBoneRotationMap = {};
+
+    for (const [bone, value] of Object.entries(target) as [
+      ExtendedRigBone,
+      NonNullable<ExtendedBoneRotationMap[ExtendedRigBone]>,
+    ][]) {
+      const previousValue = state.lastOutput[bone];
+      if (!previousValue) {
+        output[bone] = value;
+        continue;
+      }
+      const previous = new Quaternion(
+        previousValue.x,
+        previousValue.y,
+        previousValue.z,
+        previousValue.w,
+      ).normalize();
+      let next = new Quaternion(value.x, value.y, value.z, value.w).normalize();
+      const dot = Math.min(1, Math.abs(previous.dot(next)));
+      const angle = 2 * Math.acos(dot);
+      if (angle <= deadband) {
+        next = previous;
+      } else if (angle > maxStep) {
+        next = previous.clone().slerp(next, maxStep / angle);
+      }
+      // 大动作提高响应，静态/小动作保持更强平滑。
+      const motionBoost = Math.min(0.72, angle / (35 * DEG));
+      const alpha = Math.min(1, baseAlpha + (1 - baseAlpha) * motionBoost);
+      const smoothed = previous.slerp(next, alpha);
+      output[bone] = { x: smoothed.x, y: smoothed.y, z: smoothed.z, w: smoothed.w };
+    }
+    state.lastOutput = output;
+    state.lastOutputMs = nowMs;
+    return output;
   }
 }
