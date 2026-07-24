@@ -40,8 +40,10 @@ const IDENTITY = new Quaternion();
  *      注：实验过校准帧坐标系修正（frameRotation），实测会把检测器
  *      系统噪声注入映射、误差反而增大（离线评估 18.0° vs 15.8°），故不采用——
  *      image/world landmarks 与预览画面同系，原样复现才符合用户观感。
+ * v5 = 头颈旋转改为“肩胸绝对朝向 + 头部局部增量”。转身时 Neck 与 Head
+ *      必然先跟随身体，鼻部短时丢失也不会把头钉在世界正面。
  */
-export const MAPPER_VERSION = 'absolute-world-v4';
+export const MAPPER_VERSION = 'absolute-world-v5';
 
 /**
  * 绑定姿态（T-Pose，面向 +Z，Y 向上）下各肢体段的世界方向。
@@ -208,24 +210,6 @@ export function mapPoseFrameToBoneRotations(
     result[bone] = { x: scaled.x, y: scaled.y, z: scaled.z, w: scaled.w };
   };
 
-  const emitRelativeDelta = (
-    segment: DrivenSegment,
-    bone: StandardRigBone,
-    current: Vector3 | null,
-    maxAngle?: number,
-  ) => {
-    const rest = calibration.restDirections[segment];
-    if (!current || current.lengthSq() < 1e-10 || !rest) {
-      emitDelta(segment, bone, current, maxAngle);
-      return;
-    }
-    const restV = new Vector3(rest.x, rest.y, rest.z);
-    if (restV.lengthSq() < 1e-10) return;
-    const q = new Quaternion().setFromUnitVectors(restV.normalize(), current.normalize());
-    if (maxAngle !== undefined) clampQuaternionAngle(q, maxAngle);
-    result[bone] = { x: q.x, y: q.y, z: q.z, w: q.w };
-  };
-
   // 四肢：绝对方向对齐，不限角（膝盖反向由方向向量自然表达）
   for (const [segment, [from, to]] of Object.entries(SEGMENT_ENDPOINTS)) {
     if (upperBodyOnly && LEG_SEGMENTS.has(segment)) continue; // 上半身模式：双腿不驱动
@@ -327,14 +311,76 @@ export function mapPoseFrameToBoneRotations(
     };
   }
 
-  // 头部：肩中点 → 鼻相对校准姿态的增量。不能直接对齐 +Y：
-  // 鼻子天然位于头部前方，绝对方向会把这段解剖偏移误判成持续低头。
-  const headCurrent = (() => {
-    const shoulderMid = mid('left_shoulder', 'right_shoulder');
-    const nose = point('nose');
-    return shoulderMid && nose ? nose.sub(shoulderMid) : null;
-  })();
-  emitRelativeDelta('head', 'Head', headCurrent, maxHeadTurn);
+  // 头颈必须以肩胸朝向为父级基准：先随躯干整体转向，再叠加头部相对肩胸的动作。
+  // 直接在世界系比较“肩中点 → 鼻”会让身体转身时 Head 被限制在旧正面，形成拧颈。
+  if (torsoRotation) {
+    let localHeadDelta = new Quaternion();
+    const nose = orientationPoint('nose');
+    const restNose = calibrationPoint('nose');
+    const currentTorsoFrame =
+      shoulderLateral && torsoVertical
+        ? bodyFrameQuaternion(shoulderLateral, torsoVertical)
+        : null;
+    const restTorsoFrame =
+      restShoulderLateral && restVertical
+        ? bodyFrameQuaternion(restShoulderLateral, restVertical)
+        : null;
+    if (
+      nose &&
+      shoulderMid &&
+      restNose &&
+      restShoulderMid &&
+      currentTorsoFrame &&
+      restTorsoFrame
+    ) {
+      const currentLocal = nose
+        .clone()
+        .sub(shoulderMid)
+        .applyQuaternion(currentTorsoFrame.clone().invert());
+      const restLocal = restNose
+        .clone()
+        .sub(restShoulderMid)
+        .applyQuaternion(restTorsoFrame.clone().invert());
+      if (currentLocal.lengthSq() >= 1e-10 && restLocal.lengthSq() >= 1e-10) {
+        localHeadDelta = new Quaternion().setFromUnitVectors(
+          restLocal.normalize(),
+          currentLocal.normalize(),
+        );
+        clampQuaternionAngle(localHeadDelta, maxHeadTurn);
+      }
+    }
+
+    const neckWorld = torsoRotation.clone().multiply(scaleQuaternion(localHeadDelta, 0.35));
+    const headWorld = torsoRotation.clone().multiply(localHeadDelta);
+    result.Neck = {
+      x: neckWorld.x,
+      y: neckWorld.y,
+      z: neckWorld.z,
+      w: neckWorld.w,
+    };
+    result.Head = {
+      x: headWorld.x,
+      y: headWorld.y,
+      z: headWorld.z,
+      w: headWorld.w,
+    };
+  } else {
+    // 躯干横轴暂时不可用时沿用相对校准的头部回退，避免头部完全冻结。
+    const headCurrent = (() => {
+      const currentShoulderMid = mid('left_shoulder', 'right_shoulder');
+      const nose = point('nose');
+      return currentShoulderMid && nose ? nose.sub(currentShoulderMid) : null;
+    })();
+    const rest = calibration.restDirections.head;
+    if (headCurrent && rest) {
+      const q = new Quaternion().setFromUnitVectors(
+        new Vector3(rest.x, rest.y, rest.z).normalize(),
+        headCurrent.normalize(),
+      );
+      clampQuaternionAngle(q, maxHeadTurn);
+      result.Head = { x: q.x, y: q.y, z: q.z, w: q.w };
+    }
+  }
 
   return result;
 }

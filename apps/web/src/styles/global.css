@@ -2346,6 +2346,19 @@ img.cover {
 .dance-actions {
   margin-top: var(--sp-3);
 }
+.dance-confidence-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: center;
+}
+.dance-confidence-detail {
+  display: block;
+  width: 100%;
+  margin-top: 3px;
+  color: var(--text-2);
+  font-size: var(--fs-xs);
+}
 .calib-panel {
   position: absolute;
   left: var(--sp-3);

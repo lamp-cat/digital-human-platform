@@ -22,6 +22,7 @@ import {
   FaceDriveManager,
   type FaceTrackingStatus,
   LandmarkSmoother,
+  TemporalPoseCompleter,
   TrackingLossManager,
   calibrate,
   calibrationHipHeight,
@@ -80,6 +81,15 @@ interface DanceVideoInfo {
   width: number;
   height: number;
   sizeBytes: number;
+}
+
+interface DanceRecognitionMetrics {
+  frames: number;
+  rawConfidence: number;
+  effectiveConfidence: number;
+  coverage80: number;
+  trackingCoverage: number;
+  inferredPerFrame: number;
 }
 
 const DEFAULT_PLACEMENT: AvatarPlacement = {
@@ -207,6 +217,22 @@ export function MotionPage({ workspace = 'studio' }: { workspace?: 'studio' | 'v
   const danceStateRef = useRef<DanceState>('empty');
   const danceFinishingRef = useRef(false);
   const danceRunTokenRef = useRef(0);
+  const danceCompleterRef = useRef(
+    new TemporalPoseCompleter({
+      trackingMode: 'full',
+      maxGapMs: 1200,
+      minInferenceConfidence: 0.68,
+      maxInferenceConfidence: 0.86,
+    }),
+  );
+  const danceConfidenceStatsRef = useRef({
+    frames: 0,
+    activeFrames: 0,
+    rawSum: 0,
+    effectiveSum: 0,
+    covered80: 0,
+    inferredLandmarks: 0,
+  });
   const danceSmootherRef = useRef(new LandmarkSmoother({ minCutoff: 1.5, beta: 0.3 }));
   const danceLossMgrRef = useRef(new TrackingLossManager({ trackingMode: 'full' }));
   const latestDancePoseRef = useRef<PoseFrame | null>(null);
@@ -253,6 +279,8 @@ export function MotionPage({ workspace = 'studio' }: { workspace?: 'studio' | 'v
   const [danceCalibrationConfidence, setDanceCalibrationConfidence] = useState<number | null>(
     null,
   );
+  const [danceRecognitionMetrics, setDanceRecognitionMetrics] =
+    useState<DanceRecognitionMetrics | null>(null);
   const [danceError, setDanceError] = useState('');
   const [danceOutputUrl, setDanceOutputUrl] = useState<string | null>(null);
   const [danceOutputName, setDanceOutputName] = useState('digital-human-dance.webm');
@@ -322,8 +350,28 @@ export function MotionPage({ workspace = 'studio' }: { workspace?: 'studio' | 'v
   const handleDanceFrame = useCallback((frame: PoseFrame) => {
     const calibration = danceCalibrationRef.current;
     if (!calibration) return;
-    const smoothed = danceSmootherRef.current.apply(frame);
+    const completion = danceCompleterRef.current.apply(frame);
+    const smoothed = danceSmootherRef.current.apply(completion.frame);
     latestDancePoseRef.current = smoothed;
+    const stats = danceConfidenceStatsRef.current;
+    stats.frames += 1;
+    stats.rawSum += completion.rawConfidence;
+    if (completion.frame.landmarks.length > 0) {
+      stats.activeFrames += 1;
+      stats.effectiveSum += completion.effectiveConfidence;
+      stats.covered80 += completion.effectiveConfidence >= 0.8 ? 1 : 0;
+      stats.inferredLandmarks += completion.inferredLandmarks.length;
+    }
+    if (stats.frames === 1 || stats.frames % 6 === 0) {
+      setDanceRecognitionMetrics({
+        frames: stats.frames,
+        rawConfidence: stats.rawSum / stats.frames,
+        effectiveConfidence: stats.effectiveSum / Math.max(1, stats.activeFrames),
+        coverage80: stats.covered80 / Math.max(1, stats.activeFrames),
+        trackingCoverage: stats.activeFrames / stats.frames,
+        inferredPerFrame: stats.inferredLandmarks / Math.max(1, stats.activeFrames),
+      });
+    }
     const rotations = mapPoseFrameToBoneRotations(smoothed, calibration, {
       mirror: false,
       trackingMode: 'full',
@@ -921,6 +969,15 @@ export function MotionPage({ workspace = 'studio' }: { workspace?: 'studio' | 'v
     stopDanceModels();
     danceRecorderRef.current?.cancel();
     danceRecorderRef.current = null;
+    danceCompleterRef.current.reset();
+    danceConfidenceStatsRef.current = {
+      frames: 0,
+      activeFrames: 0,
+      rawSum: 0,
+      effectiveSum: 0,
+      covered80: 0,
+      inferredLandmarks: 0,
+    };
     danceSmootherRef.current.reset();
     danceLossMgrRef.current.reset();
     danceHandStabilizerRef.current.reset();
@@ -932,6 +989,7 @@ export function MotionPage({ workspace = 'studio' }: { workspace?: 'studio' | 'v
     setDanceProgress(0);
     setDanceTrackingStatus('tracking');
     setDanceHandPresence('none');
+    setDanceRecognitionMetrics(null);
     setDanceState(danceInfo ? 'ready' : 'empty');
     controllerRef.current?.pkg?.playAnimation('idle-01');
     setActiveAnim('idle-01');
@@ -945,6 +1003,17 @@ export function MotionPage({ workspace = 'studio' }: { workspace?: 'studio' | 'v
     danceVideoRef.current?.pause();
     stopDanceModels();
     setDanceProgress(1);
+    const stats = danceConfidenceStatsRef.current;
+    if (stats.frames > 0) {
+      setDanceRecognitionMetrics({
+        frames: stats.frames,
+        rawConfidence: stats.rawSum / stats.frames,
+        effectiveConfidence: stats.effectiveSum / Math.max(1, stats.activeFrames),
+        coverage80: stats.covered80 / Math.max(1, stats.activeFrames),
+        trackingCoverage: stats.activeFrames / stats.frames,
+        inferredPerFrame: stats.inferredLandmarks / Math.max(1, stats.activeFrames),
+      });
+    }
 
     try {
       if (state === 'recording' && danceRecorderRef.current) {
@@ -1078,6 +1147,16 @@ export function MotionPage({ workspace = 'studio' }: { workspace?: 'studio' | 'v
       controller.pkg.stopAnimation();
       controller.pkg.resetFaceExpressions();
       setActiveAnim(null);
+      danceCompleterRef.current.reset();
+      danceConfidenceStatsRef.current = {
+        frames: 0,
+        activeFrames: 0,
+        rawSum: 0,
+        effectiveSum: 0,
+        covered80: 0,
+        inferredLandmarks: 0,
+      };
+      setDanceRecognitionMetrics(null);
       danceSmootherRef.current.reset();
       danceLossMgrRef.current = new TrackingLossManager({
         trackingMode: 'full',
@@ -1755,8 +1834,8 @@ export function MotionPage({ workspace = 'studio' }: { workspace?: 'studio' | 'v
             </div>
             <p className="muted">
               {danceQuality === 'accurate'
-                ? '使用 Heavy 高精度全身模型（推荐），并叠加 21 点双手识别、蹲起脚底锁定与分级抗抖。'
-                : '使用 Full 轻量模型，保留蹲起脚底锁定，适合较长视频或低配电脑。'}
+                ? '使用 Heavy 高精度全身模型（推荐），并叠加短时遮挡推理、骨长约束、21 点双手识别、蹲起脚底锁定与分级抗抖。'
+                : '使用 Full 轻量模型，保留时序推理、骨长约束和蹲起脚底锁定，适合较长视频或低配电脑。'}
             </p>
 
             {(danceBusy || danceState === 'completed') && (
@@ -1800,6 +1879,39 @@ export function MotionPage({ workspace = 'studio' }: { workspace?: 'studio' | 'v
                     </Badge>
                   </>
                 )}
+              </p>
+            )}
+            {danceRecognitionMetrics && (
+              <p className="dance-confidence-row">
+                <Badge
+                  kind={
+                    danceRecognitionMetrics.effectiveConfidence >= 0.8
+                      ? 'success'
+                      : 'warning'
+                  }
+                >
+                  有效置信度{' '}
+                  {(danceRecognitionMetrics.effectiveConfidence * 100).toFixed(0)}%
+                </Badge>{' '}
+                <Badge
+                  kind={danceRecognitionMetrics.coverage80 >= 0.8 ? 'success' : 'warning'}
+                >
+                  ≥80% 帧覆盖 {(danceRecognitionMetrics.coverage80 * 100).toFixed(0)}%
+                </Badge>{' '}
+                <Badge
+                  kind={danceRecognitionMetrics.trackingCoverage >= 0.8 ? 'success' : 'warning'}
+                >
+                  人物追踪 {(danceRecognitionMetrics.trackingCoverage * 100).toFixed(0)}%
+                </Badge>{' '}
+                <Badge kind="info">
+                  时序推理 {danceRecognitionMetrics.inferredPerFrame.toFixed(1)} 点/帧
+                </Badge>
+                <span className="dance-confidence-detail">
+                  MediaPipe 原始均值{' '}
+                  {(danceRecognitionMetrics.rawConfidence * 100).toFixed(0)}%，
+                  有效值和 ≥80% 覆盖仅统计检测或短时推理仍有效的帧；长时间人物离开画面
+                  不会凭空生成姿态，也不会覆盖原始分数。
+                </span>
               </p>
             )}
 

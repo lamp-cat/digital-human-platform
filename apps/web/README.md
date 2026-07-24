@@ -41,13 +41,13 @@ npm run build --workspace apps/web       # vite build
 
 ## 关键约定
 
-- **骨骼驱动的世界系约定**：`rig-mapping` 输出相对绑定姿态的世界系旋转增量，`avatar-runtime` 的 `applyBoneRotations` 按父先子后顺序写入。v2 绝对方向映射（`absolute-world-v2`）：优先用 MediaPipe worldLandmarks（米制、髋部原点、深度可靠）把骨骼世界方向直接对齐关键点肢体方向，与校准姿势无关（站立预备即可校准）；镜像预览只是 video 的 CSS 显示（`scaleX(-1)`），骨骼映射走解剖学对应（`mirror: false`，右手驱动右手）。
+- **骨骼驱动的世界系约定**：`rig-mapping` 输出相对绑定姿态的世界系旋转增量，`avatar-runtime` 的 `applyBoneRotations` 按父先子后顺序写入。`absolute-world-v5` 优先用 MediaPipe worldLandmarks（米制、髋部原点、深度可靠）把骨骼世界方向直接对齐关键点肢体方向；肩胸朝向作为 Neck/Head 的世界基准，头部只叠加局部增量。镜像预览只是 video 的 CSS 显示（`scaleX(-1)`），骨骼映射走解剖学对应（`mirror: false`，右手驱动右手）。
 - **换装事务**：编辑器点穿搭卡片时先经 `AvatarPackage.wearTrait()`（内部调 schema `checkWearable()`）校验并预构建，成功才写入文档 store；失败 toast 结构化原因，场景与文档均不变。
 - **导入人物能力分级**：`assetSource.type === 'imported'` 时，编辑器只显示导入 manifest 声明的可编辑参数（`editableProfile`）；`POSE_ONLY` 隐藏换装面板并显示「可动作控制，不支持 V1 通用换装」。
 - **摄像头隐私**：视频与关键点完全在浏览器本地处理（MediaPipe wasm 本地加载），不上传任何帧。
-- **真人视频复现**：在 `/video/:id` 独立页面导入本地视频，先跨时间轴粗扫，再围绕最清晰的完整人体帧精细标定；播放阶段以媒体时间戳同步身体和双手识别，源视频不镜像。Three.js 最终画布由 `MediaRecorder` 录成 WebM。
+- **真人视频复现**：在 `/video/:id` 独立页面导入本地视频，先跨时间轴粗扫，再围绕最清晰的完整人体帧精细标定；播放阶段以媒体时间戳同步身体和双手识别，低置信/短时缺失点由阻尼速度预测、弱检测重锚和骨长约束补全，源视频不镜像。页面分别显示原始置信度、有效置信度、≥80% 帧覆盖和人物追踪覆盖；Three.js 最终画布由 `MediaRecorder` 录成 WebM。
 - **全身蹲起**：全身模式用髋中点到支撑脚踝的垂直距离估算重心高度，Hips 根位移配合腿部绝对旋转实现脚底锁定；站姿死区、One Euro 和速度限制抑制上下抽动。仅上半身模式不写 Hips 旋转或位移。
-- **躯干转体**：肩线、髋线和髋肩竖轴组成三维身体坐标系，水平朝向按世界系绝对角驱动 Hips、Spine、Chest 与 UpperChest，支持接近 180° 的侧身/背身和肩髋分离扭转；上半身模式只驱动 Spine/Chest，不写 Hips。
+- **躯干转体**：肩线、髋线和髋肩竖轴组成三维身体坐标系，水平朝向按世界系绝对角驱动 Hips、Spine、Chest 与 UpperChest；Neck/Head 先跟随肩胸转向，再叠加头部相对动作，鼻部短时丢失也不会锁死世界正面。支持接近 180° 的侧身/背身和肩髋分离扭转；上半身模式仍不写 Hips。
 - **直播间导入**：默认加载 Kenney CC0 家具直播间；本地支持 GLB、嵌入式 glTF、FBX 和 OBJ，模型完成解析与边界检查后才替换当前房间。
 - **骨架动作抗抖**：导入人物的动画按 StandardRig 父链世界旋转增量和模型绑定姿态重定向；坐下/站起共用严格互逆关键帧，单次播放保持末帧，动作切换使用 0.35 秒交叉淡化。
 - **面部表情追踪**：Face Landmarker（单脸 478 点 + 52 blendshape）→ 中性脸中位数标定 → 偏置/死区消除 → One Euro 平滑 → VRM 1.0 Expression、VRM 0.x BlendShapeGroup 或普通 GLB Morph。面部丢失后先短暂保持，再平滑回中性。
@@ -61,12 +61,14 @@ npm run build --workspace apps/web       # vite build
 
 ```bash
 node scripts/pose-video-lab.mjs            # playwright + 本机 Chrome，报告存 tmp/pose-lab-report.json
-# 常用参数：--query "auto=1&start=86&end=620&interval=0.15&calibSec=604&model=heavy&delegate=CPU&smooth=1"
+# 常用参数：--query "auto=1&start=0&end=20&interval=0.2&calibSec=2&model=heavy&delegate=CPU&smooth=1&complete=1"
 ```
 
 误差解读：主指标 `errors`（vs 图像关键点）受图像 z 噪声限制；自检 `errorsWorld`
 （vs worldLandmarks）验证管线一致性（无 clamp 段应≈0）。回归夹具在
 `packages/rig-mapping/test/fixtures/`（广播体操真实帧），由 vitest 断言方向语义。
+`complete=1` 额外报告原始/有效置信度、≥80% 有效帧覆盖、人物追踪覆盖和每个有效帧
+的推理点数；超过 1.2 秒且没有弱检测可重锚时停止推理，避免人物离场后继续“幻觉动作”。
 
 ## MediaPipe 本地化
 

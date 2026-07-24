@@ -4,6 +4,7 @@ import type { PoseFrame, PoseLandmark, StandardRigBone } from '@dhp/avatar-schem
 import {
   LandmarkSmoother,
   MAPPER_VERSION,
+  TemporalPoseCompleter,
   calibrate,
   hasWorldCoords,
   imageToWorld,
@@ -31,6 +32,7 @@ import { VideoFilePoseTracker } from '@dhp/vision-runtime';
  * - calibSec/calibWin：校准中心与半窗（秒，默认 2/±0.5，窗口内取逐关键点中位帧）
  * - model：full|heavy（默认 heavy）；delegate：GPU|CPU（默认 CPU，headless 可用）
  * - mirror：0|1（默认 0，解剖学对应）；smooth：0|1（默认 0）；minCutoff/beta：滤波参数
+ * - complete：0|1（默认 0）；1 时启用与视频复现相同的时序/骨长推理补全
  * - minVis：误差统计的关键点可见性门槛（默认 0.6）；dump：1 时把全部 PoseFrame 一并输出
  */
 
@@ -58,6 +60,12 @@ export interface PoseLabResult {
     beta: number;
     minVis: number;
     sampledFrames: number;
+    completion: boolean;
+    rawConfidenceMean: number;
+    effectiveConfidenceMean: number;
+    coverage80: number;
+    trackingCoverage: number;
+    inferredLandmarksPerFrame: number;
     mapperVersion: string;
     ranAt: string;
   };
@@ -183,6 +191,7 @@ interface LabParams {
   beta: number;
   minVis: number;
   dump: boolean;
+  complete: boolean;
   auto: boolean;
 }
 
@@ -204,6 +213,7 @@ function parseParams(): LabParams {
     beta: num('beta', 0.3),
     minVis: num('minVis', 0.6),
     dump: q.get('dump') === '1',
+    complete: q.get('complete') === '1',
     auto: q.get('auto') === '1',
   };
 }
@@ -305,10 +315,31 @@ export function PoseLabPage() {
       const times: number[] = [];
       for (let t = params.start; t <= params.end + 1e-6; t += params.interval) times.push(Number(t.toFixed(3)));
       const rawFrames: Array<{ t: number; frame: PoseFrame }> = [];
+      const completer = new TemporalPoseCompleter({ trackingMode: 'full' });
+      let rawConfidenceSum = 0;
+      let effectiveConfidenceSum = 0;
+      let covered80 = 0;
+      let activeFrames = 0;
+      let inferredLandmarks = 0;
       const smoother = new LandmarkSmoother({ minCutoff: params.minCutoff, beta: params.beta });
       setStatus(`采样检测中（0/${times.length}）…`);
       await tracker.sampleTimes(times, (frame, t) => {
-        const out = params.smooth ? smoother.apply(frame) : frame;
+        const completion = params.complete
+          ? completer.apply(frame)
+          : {
+              frame,
+              rawConfidence: frame.confidence,
+              effectiveConfidence: frame.confidence,
+              inferredLandmarks: [] as string[],
+            };
+        const out = params.smooth ? smoother.apply(completion.frame) : completion.frame;
+        rawConfidenceSum += completion.rawConfidence;
+        if (completion.frame.landmarks.length > 0) {
+          activeFrames += 1;
+          effectiveConfidenceSum += completion.effectiveConfidence;
+          covered80 += completion.effectiveConfidence >= 0.8 ? 1 : 0;
+          inferredLandmarks += completion.inferredLandmarks.length;
+        }
         rawFrames.push({ t, frame: out });
         drawOverlay(frame);
         if (rawFrames.length % 20 === 0) {
@@ -433,6 +464,12 @@ export function PoseLabPage() {
           beta: params.beta,
           minVis: params.minVis,
           sampledFrames: rawFrames.length,
+          completion: params.complete,
+          rawConfidenceMean: rawConfidenceSum / Math.max(1, rawFrames.length),
+          effectiveConfidenceMean: effectiveConfidenceSum / Math.max(1, activeFrames),
+          coverage80: covered80 / Math.max(1, activeFrames),
+          trackingCoverage: activeFrames / Math.max(1, rawFrames.length),
+          inferredLandmarksPerFrame: inferredLandmarks / Math.max(1, activeFrames),
           mapperVersion: MAPPER_VERSION,
           ranAt: new Date().toISOString(),
         },
@@ -465,7 +502,7 @@ export function PoseLabPage() {
     <div style={{ padding: 16, fontFamily: 'monospace', color: '#ddd', background: '#111', minHeight: '100vh' }}>
       <h2 style={{ margin: '0 0 8px' }}>Pose Lab（动作映射矫正调试）</h2>
       <p style={{ margin: '4px 0' }}>
-        状态：{status}（{(progress * 100).toFixed(0)}%） model={params.model} delegate={params.delegate} mapper={MAPPER_VERSION}
+        状态：{status}（{(progress * 100).toFixed(0)}%） model={params.model} delegate={params.delegate} mapper={MAPPER_VERSION} complete={params.complete ? 'on' : 'off'}
       </p>
       {!params.auto && (
         <button onClick={() => void run()} style={{ margin: '8px 0', padding: '6px 16px' }}>
@@ -511,6 +548,10 @@ export function PoseLabPage() {
       {result && (
         <p style={{ marginTop: 8 }}>
           自检（vs worldLandmarks）：overall mean {result.overallWorld.mean.toFixed(1)}° / P95 {result.overallWorld.p95.toFixed(1)}°
+          {' · '}原始置信度 {(result.meta.rawConfidenceMean * 100).toFixed(1)}%
+          {' · '}有效置信度 {(result.meta.effectiveConfidenceMean * 100).toFixed(1)}%
+          {' · '}≥80% 覆盖 {(result.meta.coverage80 * 100).toFixed(1)}%
+          {' · '}人物追踪覆盖 {(result.meta.trackingCoverage * 100).toFixed(1)}%
         </p>
       )}
     </div>

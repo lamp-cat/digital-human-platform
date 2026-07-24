@@ -76,6 +76,13 @@ try {
     `\nmapper=${m.mapperVersion} model=${m.model} delegate=${m.delegate} ` +
       `采样=${m.sampledFrames} 帧（${m.start}–${m.end}s @${m.interval}s）校准=${m.calibSec}±${m.calibWin}s`,
   );
+  console.log(
+    `confidence: raw=${(m.rawConfidenceMean * 100).toFixed(1)}% ` +
+      `effective=${(m.effectiveConfidenceMean * 100).toFixed(1)}% ` +
+      `coverage>=80%=${(m.coverage80 * 100).toFixed(1)}% ` +
+      `tracking=${(m.trackingCoverage * 100).toFixed(1)}% ` +
+      `inferred=${m.inferredLandmarksPerFrame.toFixed(1)} landmarks/active-frame`,
+  );
   console.log(`worldSanity: ${JSON.stringify(result.worldSanity)}`);
   console.log(`\n${'肢体段'.padEnd(16)} ${'平均°'.padStart(7)} ${'P95°'.padStart(7)} ${'最大°'.padStart(7)} ${'帧数'.padStart(6)}`);
   for (const [id, e] of Object.entries(result.errors)) {

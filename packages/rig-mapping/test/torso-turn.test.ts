@@ -80,9 +80,9 @@ function yawDegrees(q: { x: number; y: number; z: number; w: number }): number {
 describe('主角转体映射', () => {
   const calibration = calibrate([makeTurnFrame(0), makeTurnFrame(0)]);
 
-  it('整个人侧转 90° 时 Hips、Spine、Chest 和 UpperChest 共同转向', () => {
+  it('整个人侧转 90° 时从 Hips 到 Head 的骨架链共同转向', () => {
     const rotations = mapPoseFrameToBoneRotations(makeTurnFrame(90), calibration);
-    for (const bone of ['Hips', 'Spine', 'Chest', 'UpperChest'] as const) {
+    for (const bone of ['Hips', 'Spine', 'Chest', 'UpperChest', 'Neck', 'Head'] as const) {
       expect(rotations[bone], bone).toBeDefined();
       expect(yawDegrees(rotations[bone]!), bone).toBeCloseTo(90, 1);
     }
@@ -142,6 +142,7 @@ describe('主角转体映射', () => {
     expect(rotations.LeftUpperLeg).toBeUndefined();
     expect(yawDegrees(rotations.Spine!)).toBeCloseTo(90, 1);
     expect(yawDegrees(rotations.Chest!)).toBeCloseTo(90, 1);
+    expect(yawDegrees(rotations.Head!)).toBeCloseTo(90, 1);
   });
 
   it('侧身时远侧肩可见性略低仍保留转体结果', () => {
@@ -150,6 +151,15 @@ describe('主角转体映射', () => {
       calibration,
     );
     expect(yawDegrees(rotations.Chest!)).toBeCloseTo(90, 1);
+  });
+
+  it('转身时鼻部短暂丢失，Neck 和 Head 仍跟随肩胸而非锁在世界正面', () => {
+    const rotations = mapPoseFrameToBoneRotations(
+      makeTurnFrame(120, 120, { nose: 0 }),
+      calibration,
+    );
+    expect(yawDegrees(rotations.Neck!)).toBeCloseTo(120, 1);
+    expect(yawDegrees(rotations.Head!)).toBeCloseTo(120, 1);
   });
 
   it('越过背身的 179° → -179° 时四元数保持旋转连续', () => {
