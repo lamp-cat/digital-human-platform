@@ -1,0 +1,49 @@
+# macOS / editor files
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+
+# Environment and secrets
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# JavaScript
+node_modules/
+**/node_modules/
+dist/
+**/dist/
+build/
+coverage/
+*.tsbuildinfo
+
+# Python
+.venv/
+**/.venv/
+__pycache__/
+**/__pycache__/
+*.py[cod]
+.pytest_cache/
+**/.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Runtime data
+apps/api/data/
+*.db
+*.sqlite
+*.sqlite3
+
+# Downloaded MediaPipe models and WASM runtime
+apps/web/public/mediapipe/
+
+# Local diagnostics and logs
+tmp/
+*.log
+*.pid
+
+# Local source video (the web demo copy lives under apps/web/public/samples/)
+/第九套广播体操教程单人竖屏.mp4
