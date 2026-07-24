@@ -125,7 +125,7 @@ export function AvatarsPage() {
                       编辑
                     </Link>
                     <Link className="btn btn-sm" to={`/motion/${a.id}`}>
-                      动作
+                      直播间
                     </Link>
                     <button className="btn btn-sm" onClick={() => void duplicate(a.id)}>
                       复制

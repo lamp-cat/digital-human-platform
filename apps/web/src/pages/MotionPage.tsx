@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState, type ChangeEvent } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
 import {
   FINGER_EXTENSION_BONES,
@@ -10,6 +10,10 @@ import {
   type PoseFrame,
   type PoseTrackingMode,
 } from '@dhp/avatar-schema';
+import {
+  PRESET_ANIMATION_DEFINITIONS,
+  type PresetAnimationId,
+} from '@dhp/avatar-runtime';
 import {
   HandDriveManager,
   HandFrameStabilizer,
@@ -32,8 +36,13 @@ import {
 import { api, ApiError, fetchAuthedObjectUrl } from '../api/client';
 import type { AssetEntry } from '../api/types';
 import { AvatarViewport } from '../components/AvatarViewport';
-import { Badge } from '../components/controls';
-import type { AvatarSceneController } from '../three/AvatarSceneController';
+import { Badge, SliderRow } from '../components/controls';
+import {
+  STUDIO_CAMERA_PRESETS,
+  type AvatarPlacement,
+  type AvatarSceneController,
+  type StudioCameraPose,
+} from '../three/AvatarSceneController';
 
 type DriveState = 'idle' | 'starting' | 'calibrating' | 'driving' | 'denied';
 
@@ -43,14 +52,25 @@ type PoseQuality = 'accurate' | 'smooth';
 /** 手部检出状态（面板显示）。 */
 type HandPresence = 'none' | 'left' | 'right' | 'both';
 
-const PRESETS = [
-  { id: 'idle-01', label: '待机' },
-  { id: 'wave-01', label: '挥手' },
-  { id: 'walk-01', label: '走路' },
-] as const;
+type AvatarStance = 'standing' | 'seated' | 'transition';
+type RoomStatus = 'loading' | 'ready' | 'error' | 'none';
+
+const DEFAULT_PLACEMENT: AvatarPlacement = {
+  x: 0,
+  y: 0,
+  z: 0,
+  rotationYDeg: 0,
+  scale: 1,
+};
+
+interface SavedCamera {
+  id: string;
+  label: string;
+  pose: StudioCameraPose;
+}
 
 /**
- * 动作模式（文档 §3.4）：预置动作 + 摄像头姿态驱动。
+ * 虚拟直播间：房间/机位/站位编排 + 预置动作 + 摄像头姿态驱动。
  * 链路：CameraPoseTracker → LandmarkSmoother →（校准）/ mapPoseFrameToBoneRotations
  * → TrackingLossManager → applyBoneRotations。全程浏览器本地处理。
  */
@@ -67,6 +87,8 @@ export function MotionPage() {
   const sessionRef = useRef<CalibrationSession | null>(null);
   const calibrationRef = useRef<CalibrationData | null>(null);
   const videoRef = useRef<HTMLVideoElement>(null);
+  const roomInputRef = useRef<HTMLInputElement>(null);
+  const stanceTimerRef = useRef<number | null>(null);
   const driveStateRef = useRef<DriveState>('idle');
   const trackingModeRef = useRef<PoseTrackingMode>('full');
   // 手部追踪（实验性，默认关）
@@ -98,6 +120,13 @@ export function MotionPage() {
   const [faceStatus, setFaceStatus] = useState<FaceTrackingStatus | 'off' | 'loading' | 'error'>('off');
   const [faceCalibrationProgress, setFaceCalibrationProgress] = useState(0);
   const [faceSupport, setFaceSupport] = useState<number | null>(null);
+  const [roomStatus, setRoomStatus] = useState<RoomStatus>('loading');
+  const [roomName, setRoomName] = useState('Kenney CC0 直播间');
+  const [roomError, setRoomError] = useState('');
+  const [activeStudioCamera, setActiveStudioCamera] = useState('front');
+  const [savedCameras, setSavedCameras] = useState<SavedCamera[]>([]);
+  const [placement, setPlacement] = useState<AvatarPlacement>(DEFAULT_PLACEMENT);
+  const [stance, setStance] = useState<AvatarStance>('standing');
 
   const setTrackingMode = (mode: PoseTrackingMode) => {
     trackingModeRef.current = mode;
@@ -372,17 +401,94 @@ export function MotionPage() {
     [id],
   );
 
+  const loadDefaultRoom = useCallback(async (controller?: AvatarSceneController) => {
+    const target = controller ?? controllerRef.current;
+    if (!target) return;
+    setRoomStatus('loading');
+    setRoomError('');
+    const ok = await target.loadBuiltInStudioRoom();
+    if (ok) {
+      setRoomName('Kenney CC0 直播间');
+      setRoomStatus('ready');
+    } else {
+      setRoomStatus('error');
+      setRoomError('默认直播间加载失败');
+    }
+  }, []);
+
+  const onRoomFileChange = useCallback(async (event: ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    event.target.value = '';
+    if (!file || !controllerRef.current) return;
+    if (file.size > 80 * 1024 * 1024) {
+      setRoomStatus('error');
+      setRoomError('房间文件不能超过 80 MB');
+      return;
+    }
+    setRoomStatus('loading');
+    setRoomError('');
+    try {
+      const { format } = await controllerRef.current.loadStudioRoomFile(file);
+      setRoomName(`${file.name} · ${format}`);
+      setRoomStatus('ready');
+    } catch (error) {
+      setRoomStatus('error');
+      setRoomError(error instanceof Error ? error.message : '房间模型解析失败');
+    }
+  }, []);
+
+  const updatePlacement = useCallback(
+    (key: keyof AvatarPlacement, value: number) => {
+      setPlacement((current) => {
+        const next = { ...current, [key]: value };
+        return controllerRef.current?.setAvatarPlacement(next) ?? next;
+      });
+    },
+    [],
+  );
+
+  const applyPlacementPreset = useCallback((next: AvatarPlacement) => {
+    const applied = controllerRef.current?.setAvatarPlacement(next) ?? next;
+    setPlacement(applied);
+  }, []);
+
+  const switchCamera = useCallback((id: string) => {
+    if (controllerRef.current?.switchStudioCamera(id)) setActiveStudioCamera(id);
+  }, []);
+
+  const switchSavedCamera = useCallback((camera: SavedCamera) => {
+    controllerRef.current?.switchStudioCameraPose(camera.pose);
+    setActiveStudioCamera(camera.id);
+  }, []);
+
+  const saveCurrentCamera = useCallback(() => {
+    const controller = controllerRef.current;
+    if (!controller) return;
+    setSavedCameras((current) => {
+      const sequence = current.length + 1;
+      const saved: SavedCamera = {
+        id: `custom-${Date.now()}`,
+        label: `自定义 ${sequence}`,
+        pose: controller.getStudioCameraPose(),
+      };
+      return [...current.slice(-3), saved];
+    });
+  }, []);
+
   const onViewportInit = useCallback(
     (controller: AvatarSceneController) => {
       controllerRef.current = controller;
+      controller.switchStudioCamera('front', false);
       void boot(controller);
+      void loadDefaultRoom(controller);
     },
-    [boot],
+    [boot, loadDefaultRoom],
   );
 
   // 卸载时释放摄像头与手部模型
   useEffect(() => {
     return () => {
+      if (stanceTimerRef.current !== null) window.clearTimeout(stanceTimerRef.current);
       handTrackerRef.current?.stop();
       handTrackerRef.current = null;
       faceTrackerRef.current?.stop();
@@ -406,14 +512,46 @@ export function MotionPage() {
   }, [driveState, faceStatus, startFaceTracking]);
 
   // ---------- 预置动作 ----------
-  const play = (animId: string) => {
+  const play = (animId: PresetAnimationId) => {
     if (driveState === 'calibrating' || driveState === 'driving') return;
-    if (controllerRef.current?.pkg?.playAnimation(animId)) setActiveAnim(animId);
+    if (stance === 'transition') return;
+    if (animId === 'sit-down-01' && stance !== 'standing') return;
+    if (animId === 'stand-up-01' && stance !== 'seated') return;
+    if (
+      stance === 'seated' &&
+      animId !== 'stand-up-01' &&
+      animId !== 'sit-down-01'
+    ) return;
+    const pkg = controllerRef.current?.pkg;
+    if (!pkg?.playAnimation(animId)) return;
+    setActiveAnim(animId);
+    if (animId === 'belly-laugh-01') pkg.applyFaceExpressions({ happy: 0.9, aa: 0.32 });
+    else if (animId === 'cheer-01') pkg.applyFaceExpressions({ happy: 0.72 });
+    else pkg.resetFaceExpressions();
+
+    if (animId === 'sit-down-01' || animId === 'stand-up-01') {
+      setStance('transition');
+      if (stanceTimerRef.current !== null) window.clearTimeout(stanceTimerRef.current);
+      stanceTimerRef.current = window.setTimeout(() => {
+        setStance(animId === 'sit-down-01' ? 'seated' : 'standing');
+        stanceTimerRef.current = null;
+      }, 2050);
+    } else {
+      setStance('standing');
+    }
   };
 
   // ---------- 摄像头驱动 ----------
   const startCamera = async () => {
     setErrorMsg('');
+    if (stance !== 'standing') {
+      setErrorMsg(stance === 'seated' ? '请先播放“站起”，再启动摄像头驱动' : '请等待起坐动作完成');
+      return;
+    }
+    if (stanceTimerRef.current !== null) {
+      window.clearTimeout(stanceTimerRef.current);
+      stanceTimerRef.current = null;
+    }
     faceAutoStartedRef.current = false;
     setDrive('starting');
     const mode = trackingModeRef.current;
@@ -498,6 +636,10 @@ export function MotionPage() {
 
   const cameraActive = driveState === 'calibrating' || driveState === 'driving';
   const trackingLost = driveState === 'driving' && (trackingStatus === 'lost' || trackingStatus === 'blending');
+  const activeCameraLabel =
+    STUDIO_CAMERA_PRESETS.find((camera) => camera.id === activeStudioCamera)?.label ??
+    savedCameras.find((camera) => camera.id === activeStudioCamera)?.label ??
+    '自由视角';
 
   return (
     <div className="motion-page">
@@ -505,7 +647,7 @@ export function MotionPage() {
         <button className="btn btn-ghost btn-sm" onClick={() => navigate('/avatars')}>
           ← 返回
         </button>
-        <span className="motion-title">动作模式 · {avatarName || '加载中…'}</span>
+        <span className="motion-title">虚拟直播间 · {avatarName || '加载中…'}</span>
       </header>
 
       <div className="motion-body">
@@ -514,6 +656,11 @@ export function MotionPage() {
           onInit={onViewportInit}
           overlay={
             <>
+              <div className="studio-live-hud">
+                <span className="studio-live-dot" />
+                PREVIEW
+                <span className="studio-camera-name">{activeCameraLabel}</span>
+              </div>
               <video
                 ref={videoRef}
                 className={`cam-preview ${cameraActive ? 'active' : ''}`}
@@ -560,19 +707,206 @@ export function MotionPage() {
         {/* 右侧控制面板 */}
         <aside className="motion-panel">
           <section>
+            <h3 className="param-group-title">直播房间</h3>
+            <p className="muted">
+              默认房间使用 Kenney CC0 室内资产。也可在浏览器本地导入 GLB、GLTF、FBX
+              或 OBJ，模型不会上传。
+            </p>
+            <p>
+              {roomStatus === 'loading' && <Badge kind="info">房间加载中</Badge>}
+              {roomStatus === 'ready' && <Badge kind="success">{roomName}</Badge>}
+              {roomStatus === 'error' && <Badge kind="warning">加载失败</Badge>}
+              {roomStatus === 'none' && <Badge kind="info">无房间</Badge>}
+            </p>
+            {roomError && <p className="form-error">{roomError}</p>}
+            <input
+              ref={roomInputRef}
+              className="studio-file-input"
+              type="file"
+              accept=".glb,.gltf,.fbx,.obj"
+              onChange={onRoomFileChange}
+            />
+            <div className="mode-select studio-actions">
+              <button
+                className="btn btn-sm btn-primary"
+                disabled={roomStatus === 'loading'}
+                onClick={() => roomInputRef.current?.click()}
+              >
+                导入房间模型
+              </button>
+              <button
+                className="btn btn-sm"
+                disabled={roomStatus === 'loading'}
+                onClick={() => void loadDefaultRoom()}
+              >
+                恢复默认房间
+              </button>
+              <button
+                className="btn btn-sm btn-ghost"
+                onClick={() => {
+                  controllerRef.current?.clearStudioRoom();
+                  setRoomStatus('none');
+                  setRoomName('');
+                  setRoomError('');
+                }}
+              >
+                隐藏房间
+              </button>
+            </div>
+          </section>
+
+          <section>
+            <h3 className="param-group-title">导播机位</h3>
+            <p className="muted">
+              点击机位会平滑切镜；也可以先用鼠标调整自由视角，再保存为自定义机位。
+            </p>
+            <div className="studio-camera-grid">
+              {STUDIO_CAMERA_PRESETS.map((camera) => (
+                <button
+                  key={camera.id}
+                  className={`btn btn-sm ${activeStudioCamera === camera.id ? 'btn-primary' : ''}`}
+                  onClick={() => switchCamera(camera.id)}
+                >
+                  {camera.label}
+                </button>
+              ))}
+              {savedCameras.map((camera) => (
+                <button
+                  key={camera.id}
+                  className={`btn btn-sm ${activeStudioCamera === camera.id ? 'btn-primary' : ''}`}
+                  onClick={() => switchSavedCamera(camera)}
+                >
+                  {camera.label}
+                </button>
+              ))}
+            </div>
+            <div className="mode-select studio-actions">
+              <button className="btn btn-sm" onClick={saveCurrentCamera}>
+                保存当前视角
+              </button>
+              {savedCameras.length > 0 && (
+                <button
+                  className="btn btn-sm btn-ghost"
+                  onClick={() => {
+                    setSavedCameras([]);
+                    switchCamera('front');
+                  }}
+                >
+                  清空自定义
+                </button>
+              )}
+            </div>
+          </section>
+
+          <section>
+            <h3 className="param-group-title">人物站位</h3>
+            <div className="mode-select studio-actions">
+              <button
+                className="btn btn-sm"
+                onClick={() => applyPlacementPreset(DEFAULT_PLACEMENT)}
+              >
+                中央舞台
+              </button>
+              <button
+                className="btn btn-sm"
+                onClick={() =>
+                  applyPlacementPreset({
+                    x: -0.8,
+                    y: 0,
+                    z: -2.42,
+                    rotationYDeg: 0,
+                    scale: 1,
+                  })
+                }
+              >
+                沙发座位
+              </button>
+            </div>
+            <SliderRow
+              label="左右 X"
+              value={placement.x}
+              min={-3}
+              max={3}
+              step={0.05}
+              defaultValue={0}
+              onChange={(value) => updatePlacement('x', value)}
+              onReset={() => updatePlacement('x', 0)}
+              format={(value) => `${value.toFixed(2)} m`}
+            />
+            <SliderRow
+              label="高度 Y"
+              value={placement.y}
+              min={-0.25}
+              max={1}
+              step={0.01}
+              defaultValue={0}
+              onChange={(value) => updatePlacement('y', value)}
+              onReset={() => updatePlacement('y', 0)}
+              format={(value) => `${value.toFixed(2)} m`}
+            />
+            <SliderRow
+              label="前后 Z"
+              value={placement.z}
+              min={-3}
+              max={3}
+              step={0.05}
+              defaultValue={0}
+              onChange={(value) => updatePlacement('z', value)}
+              onReset={() => updatePlacement('z', 0)}
+              format={(value) => `${value.toFixed(2)} m`}
+            />
+            <SliderRow
+              label="朝向"
+              value={placement.rotationYDeg}
+              min={-180}
+              max={180}
+              step={1}
+              defaultValue={0}
+              onChange={(value) => updatePlacement('rotationYDeg', value)}
+              onReset={() => updatePlacement('rotationYDeg', 0)}
+              format={(value) => `${value.toFixed(0)}°`}
+            />
+            <SliderRow
+              label="人物缩放"
+              value={placement.scale}
+              min={0.6}
+              max={1.5}
+              step={0.01}
+              defaultValue={1}
+              onChange={(value) => updatePlacement('scale', value)}
+              onReset={() => updatePlacement('scale', 1)}
+              format={(value) => `${value.toFixed(2)}×`}
+            />
+          </section>
+
+          <section>
             <h3 className="param-group-title">预置动作</h3>
             <div className="preset-btns">
-              {PRESETS.map((p) => (
+              {PRESET_ANIMATION_DEFINITIONS.map((p) => {
+                const unavailableForStance =
+                  stance === 'transition' ||
+                  (p.id === 'sit-down-01' && stance !== 'standing') ||
+                  (p.id === 'stand-up-01' && stance !== 'seated') ||
+                  (stance === 'seated' &&
+                    p.id !== 'sit-down-01' &&
+                    p.id !== 'stand-up-01');
+                return (
                 <button
                   key={p.id}
                   className={`btn ${activeAnim === p.id ? 'btn-primary' : ''}`}
-                  disabled={cameraActive}
+                  disabled={cameraActive || unavailableForStance}
                   onClick={() => play(p.id)}
                 >
                   {p.label}
                 </button>
-              ))}
+                );
+              })}
             </div>
+            <p className="muted">
+              状态：
+              {stance === 'standing' ? '站立' : stance === 'seated' ? '坐姿' : '动作过渡中'}
+              。坐下与站起共享反向关键帧并保持末帧，导入人物按绑定骨架重定向。
+            </p>
             {cameraActive && <p className="muted">摄像头驱动中，预置动作已暂停。</p>}
           </section>
 
@@ -622,9 +956,15 @@ export function MotionPage() {
                   使用电脑摄像头实时驱动数字人。视频与关键点完全在浏览器本地处理，不会上传。
                   建议正面均匀光照。
                 </p>
-                <button className="btn btn-primary" onClick={() => void startCamera()}>
+                <button
+                  className="btn btn-primary"
+                  disabled={stance !== 'standing'}
+                  title={stance !== 'standing' ? '请先完成站起动作' : undefined}
+                  onClick={() => void startCamera()}
+                >
                   启动摄像头驱动
                 </button>
+                {stance !== 'standing' && <p className="muted">请先完成“站起”动作，避免实时骨架与坐姿冲突。</p>}
               </>
             )}
             {driveState === 'starting' && <p className="muted">正在请求摄像头权限并加载姿态模型…</p>}

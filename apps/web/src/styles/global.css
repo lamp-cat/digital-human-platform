@@ -1788,7 +1788,7 @@ img.cover {
   flex: 1;
 }
 
-/* ---------- 动作模式 ---------- */
+/* ---------- 虚拟直播间 ---------- */
 .motion-page {
   height: 100%;
   display: flex;
@@ -1801,7 +1801,7 @@ img.cover {
 .motion-body {
   flex: 1;
   display: grid;
-  grid-template-columns: 1fr 320px;
+  grid-template-columns: minmax(0, 1fr) 370px;
   min-height: 0;
 }
 .motion-panel {
@@ -1826,6 +1826,55 @@ img.cover {
 .face-actions {
   margin-top: var(--sp-3);
   flex-wrap: wrap;
+}
+.studio-file-input {
+  display: none;
+}
+.studio-actions {
+  flex-wrap: wrap;
+}
+.studio-camera-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--sp-2);
+  margin-bottom: var(--sp-3);
+}
+.studio-camera-grid .btn {
+  min-width: 0;
+  white-space: normal;
+}
+.studio-live-hud {
+  position: absolute;
+  left: var(--sp-3);
+  bottom: var(--sp-3);
+  z-index: 5;
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  padding: 7px 10px;
+  color: rgba(255, 255, 255, 0.9);
+  background: rgba(8, 12, 22, 0.7);
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: var(--r-md);
+  backdrop-filter: blur(8px);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  pointer-events: none;
+}
+.studio-live-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: #ff4d5e;
+  box-shadow: 0 0 8px rgba(255, 77, 94, 0.8);
+}
+.studio-camera-name {
+  padding-left: 7px;
+  border-left: 1px solid rgba(255, 255, 255, 0.2);
+  color: rgba(255, 255, 255, 0.68);
+  font-weight: 500;
+  letter-spacing: 0;
 }
 .cam-preview {
   position: absolute;
@@ -1887,6 +1936,22 @@ img.cover {
   display: flex;
   flex-direction: column;
   gap: var(--sp-3);
+}
+
+@media (max-width: 900px) {
+  .motion-page {
+    height: auto;
+    min-height: 100%;
+  }
+  .motion-body {
+    grid-template-columns: 1fr;
+    grid-template-rows: minmax(520px, 62vh) auto;
+  }
+  .motion-panel {
+    border-left: none;
+    border-top: 1px solid var(--border);
+    overflow-y: visible;
+  }
 }
 
 /* ---------- 管理后台 ---------- */

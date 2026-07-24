@@ -2,8 +2,10 @@ import {
   AnimationAction,
   AnimationClip,
   AnimationMixer,
+  Box3,
   BufferGeometry,
   Group,
+  LoopOnce,
   LoopRepeat,
   Material,
   Object3D,
@@ -28,7 +30,12 @@ import {
 import { createBaseAvatar, type BaseAvatar } from './base-avatar.js';
 import { applyProfile as applyProfileToBase } from './profile-apply.js';
 import { createGarment, disposeGarment, type GarmentBuildContext } from './garments.js';
-import { createPresetClips, retargetClip, type PresetAnimationId } from './animations.js';
+import {
+  PRESET_ANIMATION_PLAYBACK,
+  createPresetClips,
+  retargetClipToRig,
+  type PresetAnimationId,
+} from './animations.js';
 import { applyBoneRotations, createRigDriver, type QuatLike, type RigDriver } from './rig-driver.js';
 import type { ImportedAvatar } from './imported.js';
 import type { BoneMap } from './skeleton.js';
@@ -111,13 +118,20 @@ export class AvatarPackage {
       this.driver = opts.imported.driver;
       this.expressionDriver = createImportedExpressionDriver(opts.imported);
       // 预置动作重定向到实际骨骼名（预置动作只含 22 根最小骨架，手指骨骼跳过）
-      const nameMap = new Map<StandardRigBone, string>();
+      const animationRigMap = new Map<StandardRigBone, Object3D>();
       for (const [bone, node] of opts.imported.rigMap) {
         if ((STANDARD_RIG_BONES as readonly string[]).includes(bone)) {
-          nameMap.set(bone as StandardRigBone, node.name);
+          animationRigMap.set(bone as StandardRigBone, node);
         }
       }
-      for (const [id, clip] of createPresetClips()) this.clips.set(id, retargetClip(clip, nameMap));
+      const avatarHeight = new Box3()
+        .setFromObject(opts.imported.root)
+        .getSize(new Vector3()).y;
+      const positionScale =
+        Number.isFinite(avatarHeight) && avatarHeight > 0.2 ? avatarHeight / 1.7 : 1;
+      for (const [id, clip] of createPresetClips()) {
+        this.clips.set(id, retargetClipToRig(clip, animationRigMap, positionScale));
+      }
     } else {
       this.base = opts.avatar ?? createBaseAvatar();
       this.root.add(this.base.root);
@@ -232,16 +246,18 @@ export class AvatarPackage {
     }
   }
 
-  /** 播放预置动作（0.3s 淡入淡出）。 */
+  /** 播放预置动作（0.35s 淡入淡出；坐下/站起为单次动作并保持末帧）。 */
   playAnimation(id: PresetAnimationId | string): boolean {
     const clip = this.clips.get(id);
     if (!clip) return false;
     this.cancelRestore();
     const action = this.mixer.clipAction(clip);
-    action.setLoop(LoopRepeat, Infinity);
+    const playback = PRESET_ANIMATION_PLAYBACK[id as PresetAnimationId] ?? { loop: true };
+    action.clampWhenFinished = !playback.loop;
+    action.setLoop(playback.loop ? LoopRepeat : LoopOnce, playback.loop ? Infinity : 1);
     if (this.currentAction === action && action.isRunning()) return true;
-    action.reset().fadeIn(0.3).play();
-    if (this.currentAction && this.currentAction !== action) this.currentAction.fadeOut(0.3);
+    action.reset().fadeIn(0.35).play();
+    if (this.currentAction && this.currentAction !== action) this.currentAction.fadeOut(0.35);
     this.currentAction = action;
     return true;
   }

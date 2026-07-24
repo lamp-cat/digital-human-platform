@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { Quaternion, Vector3 } from 'three';
+import { AnimationMixer, Group, Quaternion, Vector3 } from 'three';
 import {
   BODY_SECTIONS,
   BUILT_IN_BASE_AVATAR_ID,
@@ -16,6 +16,8 @@ import {
   createBaseAvatar,
   createGarment,
   createPresetClips,
+  buildStandardSkeleton,
+  retargetClipToRig,
 } from '../src/index.js';
 
 /** 测试用 manifest 工厂。 */
@@ -263,11 +265,15 @@ describe('程序化衣物', () => {
 });
 
 describe('预置动作', () => {
-  it('三个预置 clip 轨道非空且时长正确', () => {
+  it('八个预置 clip 轨道非空且时长正确', () => {
     const clips = createPresetClips();
+    expect(clips.size).toBe(8);
     expect(clips.get('idle-01')!.duration).toBeCloseTo(3);
     expect(clips.get('wave-01')!.duration).toBeCloseTo(2);
     expect(clips.get('walk-01')!.duration).toBeCloseTo(1);
+    expect(clips.get('sit-down-01')!.duration).toBeCloseTo(2);
+    expect(clips.get('stand-up-01')!.duration).toBeCloseTo(2);
+    expect(clips.get('belly-laugh-01')!.duration).toBeCloseTo(2.1);
     for (const [, clip] of clips) {
       expect(clip.tracks.length).toBeGreaterThan(0);
       for (const track of clip.tracks) {
@@ -289,6 +295,56 @@ describe('预置动作', () => {
     const restored = base.bones.RightUpperArm.quaternion.angleTo(new Quaternion());
     expect(restored).toBeLessThan(1e-3);
     pkg.dispose();
+  });
+
+  it('坐下末帧与站起首帧逐轨道完全连续', () => {
+    const clips = createPresetClips();
+    const sit = clips.get('sit-down-01')!;
+    const stand = clips.get('stand-up-01')!;
+    const standTracks = new Map(stand.tracks.map((track) => [track.name, track]));
+    for (const sitTrack of sit.tracks) {
+      const standTrack = standTracks.get(sitTrack.name)!;
+      expect(standTrack, sitTrack.name).toBeDefined();
+      const size = sitTrack.getValueSize();
+      const sitEnd = Array.from(sitTrack.values.slice(-size));
+      const standStart = Array.from(standTrack.values.slice(0, size));
+      expect(standStart, sitTrack.name).toEqual(sitEnd);
+    }
+  });
+
+  it('导入骨架存在非单位 bind rotation 时，重定向仍从 bind 起步并保持世界动作方向', () => {
+    const { bones, rootBone } = buildStandardSkeleton();
+    const root = new Group();
+    root.add(rootBone);
+    bones.Chest.quaternion.setFromAxisAngle(new Vector3(0, 1, 0), 0.42);
+    bones.RightShoulder.quaternion.setFromAxisAngle(new Vector3(1, 0, 0), -0.18);
+    root.updateMatrixWorld(true);
+    const rigMap = new Map(
+      STANDARD_RIG_BONES.map((bone) => [bone, bones[bone]] as const),
+    );
+    const bindChest = bones.Chest.quaternion.clone();
+    const bindRightArmWorld = bones.RightUpperArm.getWorldQuaternion(new Quaternion());
+    const source = createPresetClips().get('wave-01')!;
+    const retargeted = retargetClipToRig(source, rigMap);
+
+    const chestTrack = retargeted.tracks.find(
+      (track) => track.name === 'Chest.quaternion',
+    )!;
+    const chestFirst = new Quaternion().fromArray(chestTrack.values, 0);
+    expect(chestFirst.angleTo(bindChest)).toBeLessThan(1e-5);
+
+    const mixer = new AnimationMixer(root);
+    mixer.clipAction(retargeted).play();
+    mixer.update(0.35);
+    root.updateMatrixWorld(true);
+    const actual = bones.RightUpperArm.getWorldQuaternion(new Quaternion());
+    // t=0.35：Spine +3° 与 RightUpperArm -140° 同轴叠加，世界增量为 -137°。
+    const standardDelta = new Quaternion().setFromAxisAngle(
+      new Vector3(0, 0, 1),
+      (-137 * Math.PI) / 180,
+    );
+    const expected = standardDelta.multiply(bindRightArmWorld);
+    expect(actual.angleTo(expected)).toBeLessThan(0.02);
   });
 });
 

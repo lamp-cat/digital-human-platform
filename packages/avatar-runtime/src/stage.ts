@@ -42,6 +42,7 @@ export function createStage(background = 0x16181d): Stage {
   scene.add(ground);
 
   const grid = new GridHelper(4.4, 22, 0x3a4150, 0x2a2f3a);
+  grid.name = 'stage_grid';
   grid.position.y = 0.001;
   scene.add(grid);
 
