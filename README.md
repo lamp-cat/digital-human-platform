@@ -9,6 +9,7 @@
 | 模块 | 能力 |
 | --- | --- |
 | 参数化捏人 | 11 个脸型参数、4 个体型参数、肤色与眼睛色板，支持实时预览、撤销/重做和乐观锁保存 |
+| 开源人物库 | 内置 9 个来源与许可证可追溯的角色，覆盖拟真人体、卡通冒险者、VTuber/动漫和二头身动物，可一键创建并进入动作、直播或视频复现 |
 | 模块化换装 | 16 件内置发型、上装、下装、鞋与配件；支持槽位冲突检测、体型范围校验和 BodyMask 防穿透 |
 | 外部模型导入 | VRM/GLB 上传后自动检查骨架、蒙皮、性能和权属，输出 `FULL`、`POSE_ONLY` 或 `REJECTED` 分级报告 |
 | 虚拟直播间 | 内置 CC0 家具直播间，支持 GLB/GLTF/FBX/OBJ 房间导入、相机位置/注视点/FOV 自由调整、鼠标构图、自定义机位和人物站位 |
@@ -125,6 +126,7 @@ JWT_SECRET='<替换为随机高强度密钥>' docker compose up --build
 ## 设计亮点
 
 - **统一人物规范**：以 `AvatarProfile`、`StandardRig` 和 Manifest 作为跨前后端契约，隔离模型来源差异。
+- **多风格开源人物库**：Quaternius、KayKit、VRoid、VirtualCast 与 Open Source Avatars 的 9 个角色按来源、许可和能力入库；KayKit/Quaternius 的左右侧骨骼采用显式映射，避免模糊命名造成左右手互换。
 - **事务式换装**：校验、预构建和提交作为一个完整事务；失败时保留原穿搭和人物状态。
 - **导入能力分级**：不把“文件可解析”等同于“平台完全兼容”，用结构化报告明确可编辑与可驱动边界。
 - **任务化首页与清晰工作流**：人物装扮、虚拟直播间和真人视频复现是三个独立一级入口；先选择人物再进入专属页面，只展示当前任务需要的工具。
@@ -153,6 +155,7 @@ JWT_SECRET='<替换为随机高强度密钥>' docker compose up --build
 - [虚拟直播间使用与技术说明](docs/live-studio.md)
 - [API 契约](docs/api/api-contract.md)
 - [手部追踪开源方案评估](docs/hand-tracking-open-source-evaluation.md)
+- [内置开源人物来源与许可证](apps/web/public/open-avatars/README.md)
 - [第三方组件与许可证](docs/third-party/THIRD_PARTY_NOTICES.md)
 
 本仓库尚未声明项目源代码许可证；第三方组件与示例资产分别遵循其原始许可条款。

@@ -5,6 +5,7 @@ import type {
   ImportRecord,
   ImportReport,
   Job,
+  OpenAvatarEntry,
   User,
 } from './types';
 
@@ -84,8 +85,12 @@ export const api = {
   me: () => request<{ user: User }>('/auth/me'),
 
   // 数字人
-  createAvatar: (name: string) =>
-    request<{ avatar: AvatarDetail }>('/avatars', { method: 'POST', body: JSON.stringify({ name }) }),
+  createAvatar: (name: string, catalogAssetId?: string) =>
+    request<{ avatar: AvatarDetail }>('/avatars', {
+      method: 'POST',
+      body: JSON.stringify({ name, catalogAssetId }),
+    }),
+  listOpenAvatars: () => request<{ avatars: OpenAvatarEntry[] }>('/avatars/catalog'),
   listAvatars: () => request<{ avatars: AvatarSummary[] }>('/avatars'),
   getAvatar: (id: string) => request<{ avatar: AvatarDetail }>(`/avatars/${id}`),
   patchAvatar: (id: string, body: { expectedVersion: number; profile: unknown; name?: string }) =>

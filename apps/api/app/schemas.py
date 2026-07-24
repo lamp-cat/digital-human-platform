@@ -166,8 +166,16 @@ class AssetSourceImported(BaseModel):
     compatibility: Literal["FULL", "POSE_ONLY"]
 
 
+class AssetSourceCatalog(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    type: Literal["catalog"]
+    assetId: str = Field(min_length=1)
+    compatibility: Literal["POSE_ONLY"] = "POSE_ONLY"
+
+
 AssetSource = Annotated[
-    AssetSourceBuiltIn | AssetSourceImported, Field(discriminator="type")
+    AssetSourceBuiltIn | AssetSourceCatalog | AssetSourceImported,
+    Field(discriminator="type"),
 ]
 
 

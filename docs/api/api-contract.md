@@ -17,7 +17,8 @@
 
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
-| POST | `/avatars` | `{name}` 创建默认人物 → `{avatar}` |
+| POST | `/avatars` | `{name, catalogAssetId?}` 创建默认人物或经过审核的开源目录人物 → `{avatar}` |
+| GET | `/avatars/catalog` | 获取可随平台分发的开源人物元数据、模型 URL、来源、许可证和能力 → `{avatars:[OpenAvatarEntry]}` |
 | GET | `/avatars` | 当前用户人物列表 → `{avatars:[AvatarSummary]}` |
 | GET | `/avatars/{id}` | 完整 Profile 与资产引用 → `{avatar}` |
 | PATCH | `/avatars/{id}` | `{expectedVersion, profile, name?}` 乐观锁保存 → `{avatar}`；冲突返回 409 `AVATAR_VERSION_CONFLICT` + `{details:{latestVersion, latestProfile}}` |
@@ -30,7 +31,11 @@
 { "id": "uuid", "name": "…", "baseAvatarId": "base-adult-v1", "version": 3,
   "coverUrl": "/api/v1/avatars/{id}/cover" 或 null, "visibility": "private",
   "createdAt": "…", "updatedAt": "…" }
-// avatar（详情）= AvatarSummary + { "profile": AvatarProfile, "assetSource": {...} }
+// avatar（详情）= AvatarSummary + {
+//   "profile": AvatarProfile,
+//   "assetSource": {"type":"built_in"} | {"type":"catalog","assetId":"…","compatibility":"POSE_ONLY"} | {"type":"imported",…},
+//   "modelUrl": "/open-avatars/models/….vrm" 或 null
+// }
 ```
 
 ## 资产目录（assets）

@@ -23,8 +23,8 @@ import {
 } from '../packages/avatar-runtime/src/imported.ts';
 
 const ROOT = fileURLToPath(new URL('..', import.meta.url));
-const SAMPLE_A = `${ROOT}/assets/base-avatars/samples/AvatarSample_A.vrm`;
-const SEED_SAN = `${ROOT}/assets/base-avatars/samples/Seed-san.vrm`;
+const SAMPLE_A = `${ROOT}/apps/web/public/open-avatars/models/avatar-sample-a.vrm`;
+const SEED_SAN = `${ROOT}/apps/web/public/open-avatars/models/seed-san.vrm`;
 
 const CORE_BONES = [
   'Hips', 'Spine', 'Chest', 'Neck', 'Head',

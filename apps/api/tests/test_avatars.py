@@ -38,6 +38,64 @@ def test_create_and_get(client, user_token):
     assert resp.json()["avatar"]["assetSource"] == {"type": "built_in"}
 
 
+def test_open_avatar_catalog_and_create(client, user_token):
+    resp = client.get("/api/v1/avatars/catalog", headers=auth_headers(user_token))
+    assert resp.status_code == 200
+    catalog = resp.json()["avatars"]
+    assert len(catalog) == 9
+    assert {item["category"] for item in catalog} == {
+        "拟真人物", "卡通人物", "VTuber / 动漫", "二头身动物"
+    }
+    dog = next(item for item in catalog if item["id"] == "chibi-dog")
+    assert dog["modelUrl"].endswith("/chibi-dog.vrm")
+    assert dog["licenseId"] == "CC0-1.0"
+    assert dog["sourceUrl"].startswith("https://")
+
+    resp = client.post(
+        "/api/v1/avatars",
+        json={"name": "柴犬主播", "catalogAssetId": "chibi-dog"},
+        headers=auth_headers(user_token),
+    )
+    assert resp.status_code == 201, resp.text
+    avatar = resp.json()["avatar"]
+    assert avatar["baseAvatarId"] == "catalog-chibi-dog"
+    assert avatar["assetSource"] == {
+        "type": "catalog",
+        "assetId": "chibi-dog",
+        "compatibility": "POSE_ONLY",
+    }
+    assert avatar["profile"]["assetSource"] == avatar["assetSource"]
+    assert avatar["modelUrl"] == dog["modelUrl"]
+    assert avatar["coverUrl"] == dog["thumbnailUrl"]
+
+
+def test_create_rejects_unknown_catalog_avatar(client, user_token):
+    resp = client.post(
+        "/api/v1/avatars",
+        json={"name": "未知人物", "catalogAssetId": "does-not-exist"},
+        headers=auth_headers(user_token),
+    )
+    assert resp.status_code == 404
+    assert resp.json()["code"] == "CATALOG_AVATAR_NOT_FOUND"
+
+
+def test_patch_rejects_mismatched_catalog_source(client, user_token):
+    avatar = _create(client, user_token)
+    profile = avatar["profile"]
+    profile["assetSource"] = {
+        "type": "catalog",
+        "assetId": "chibi-dog",
+        "compatibility": "POSE_ONLY",
+    }
+    resp = client.patch(
+        f"/api/v1/avatars/{avatar['id']}",
+        json={"expectedVersion": 1, "profile": profile},
+        headers=auth_headers(user_token),
+    )
+    assert resp.status_code == 422
+    assert resp.json()["code"] == "AVATAR_PROFILE_INVALID"
+
+
 def test_list_only_own(client, user_token):
     _create(client, user_token, "A")
     _create(client, user_token, "B")

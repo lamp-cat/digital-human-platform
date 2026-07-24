@@ -1,6 +1,7 @@
 """ORM → 契约 JSON 的序列化。"""
 from .database import iso
 from .models import Asset, Avatar, ImportedAsset, Job, User
+from .open_avatar_catalog import get_open_avatar
 from .signing import sign_import_token
 
 
@@ -14,12 +15,19 @@ def user_json(user: User) -> dict:
 
 
 def avatar_summary(a: Avatar) -> dict:
+    profile = a.profile_json or {}
+    source = profile.get("assetSource", {"type": "built_in"})
+    catalog = get_open_avatar(source.get("assetId", "")) if source.get("type") == "catalog" else None
     return {
         "id": a.id,
         "name": a.name,
         "baseAvatarId": a.base_avatar_id,
         "version": a.version,
-        "coverUrl": f"/api/v1/avatars/{a.id}/cover" if a.cover_key else None,
+        "coverUrl": (
+            f"/api/v1/avatars/{a.id}/cover"
+            if a.cover_key
+            else catalog["thumbnailUrl"] if catalog else None
+        ),
         "visibility": a.visibility,
         "createdAt": iso(a.created_at),
         "updatedAt": iso(a.updated_at),
@@ -31,6 +39,11 @@ def avatar_detail(a: Avatar) -> dict:
     profile = a.profile_json or {}
     detail["profile"] = profile
     detail["assetSource"] = profile.get("assetSource", {"type": "built_in"})
+    if detail["assetSource"].get("type") == "catalog":
+        catalog = get_open_avatar(detail["assetSource"].get("assetId", ""))
+        detail["modelUrl"] = catalog["modelUrl"] if catalog else None
+    else:
+        detail["modelUrl"] = None
     return detail
 
 

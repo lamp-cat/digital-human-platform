@@ -104,9 +104,12 @@ export function EditorPage() {
     return map;
   }, [assets]);
 
-  const isImported = avatarMeta?.assetSource.type === 'imported';
-  const importedCompatibility =
-    avatarMeta?.assetSource.type === 'imported' ? avatarMeta.assetSource.compatibility : null;
+  const isExternalAvatar =
+    avatarMeta != null && avatarMeta.assetSource.type !== 'built_in';
+  const externalCompatibility =
+    avatarMeta?.assetSource.type === 'imported' || avatarMeta?.assetSource.type === 'catalog'
+      ? avatarMeta.assetSource.compatibility
+      : null;
 
   // ---------- 启动加载 ----------
   const boot = useCallback(
@@ -131,6 +134,15 @@ export function EditorPage() {
           const modelUrl = importRecord.modelUrl ?? `/api/v1/imports/${importRecord.id}/model`;
           setImportMeta({ editableProfile, compatibleGarments, modelUrl });
           importedModelUrl = await fetchAuthedObjectUrl(modelUrl);
+        } else if (avatar.assetSource.type === 'catalog') {
+          if (!avatar.modelUrl) throw new Error('开源人物模型地址缺失');
+          importCompatibleGarments = [];
+          setImportMeta({
+            editableProfile: { morphs: [], materials: [] },
+            compatibleGarments: [],
+            modelUrl: avatar.modelUrl,
+          });
+          importedModelUrl = await fetchAuthedObjectUrl(avatar.modelUrl);
         }
 
         const knownGarments = new Map<string, GarmentManifest>();
@@ -243,8 +255,8 @@ export function EditorPage() {
       boneScales: doc.profile.boneScales,
       currentTraits: doc.profile.traits,
       knownGarments: manifests,
-      importCompatibleGarments: isImported ? importMeta?.compatibleGarments ?? [] : null,
-      importedCompatibility,
+      importCompatibleGarments: isExternalAvatar ? importMeta?.compatibleGarments ?? [] : null,
+      importedCompatibility: externalCompatibility,
     });
 
   const toggleGarment = (asset: AssetEntry) => {
@@ -274,10 +286,10 @@ export function EditorPage() {
     );
   }
 
-  const editableMorphs = isImported
+  const editableMorphs = isExternalAvatar
     ? MORPH_PARAM_DEFS.filter((d) => importMeta?.editableProfile.morphs.includes(d.key))
     : MORPH_PARAM_DEFS;
-  const editableMaterials = isImported
+  const editableMaterials = isExternalAvatar
     ? (['skinToneId', 'skinRoughness', 'eyeColorId'] as const).filter((m) =>
         importMeta?.editableProfile.materials.includes(m),
       )
@@ -303,9 +315,10 @@ export function EditorPage() {
             {SAVE_STATE_TEXT[doc.saveState]}
           </span>
         )}
-        {isImported && (
-          <span className={`badge ${importedCompatibility === 'FULL' ? 'badge-compat-full' : 'badge-compat-pose'}`}>
-            导入人物 · {importedCompatibility === 'FULL' ? '可换装' : '仅动作'}
+        {isExternalAvatar && (
+          <span className={`badge ${externalCompatibility === 'FULL' ? 'badge-compat-full' : 'badge-compat-pose'}`}>
+            {avatarMeta?.assetSource.type === 'catalog' ? '开源人物' : '导入人物'} ·{' '}
+            {externalCompatibility === 'FULL' ? '可换装' : '仅动作'}
           </span>
         )}
         <div className="topbar-spacer" />
@@ -404,8 +417,8 @@ export function EditorPage() {
           {booted && activeCategory === 'body' && (
             <div>
               <h3 className="param-group-title">体型参数</h3>
-              {isImported ? (
-                <p className="muted">导入人物不支持平台体型参数调整。</p>
+              {isExternalAvatar ? (
+                <p className="muted">该人物使用自带骨架，不支持平台体型参数调整。</p>
               ) : (
                 BONE_SCALE_PARAM_DEFS.map((def) => {
                   const key = def.key as BoneScaleParamKey;
@@ -492,8 +505,8 @@ export function EditorPage() {
           {booted && activeCategory === 'outfit' && (
             <div>
               <h3 className="param-group-title">穿搭</h3>
-              {importedCompatibility === 'POSE_ONLY' ? (
-                <p className="compat-notice">该导入人物可动作控制，不支持 V1 通用换装。</p>
+              {externalCompatibility === 'POSE_ONLY' ? (
+                <p className="compat-notice">该人物可动作控制，不支持 V1 通用换装。</p>
               ) : garmentAssets.length === 0 ? (
                 <p className="muted">暂无可用资产（请确认后端已发布内置资产）。</p>
               ) : (

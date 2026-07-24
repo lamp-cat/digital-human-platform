@@ -23,6 +23,22 @@ export interface AvatarSummary {
 export interface AvatarDetail extends AvatarSummary {
   profile: AvatarProfile;
   assetSource: AssetSource;
+  modelUrl: string | null;
+}
+
+export interface OpenAvatarEntry {
+  id: string;
+  displayName: string;
+  category: '拟真人物' | '卡通人物' | 'VTuber / 动漫' | '二头身动物' | string;
+  description: string;
+  creator: string;
+  modelUrl: string;
+  thumbnailUrl: string;
+  sourceUrl: string;
+  licenseId: string;
+  licenseUrl: string;
+  compatibility: 'POSE_ONLY';
+  capabilities: string[];
 }
 
 /** GarmentManifest 超集（资产目录条目）。 */

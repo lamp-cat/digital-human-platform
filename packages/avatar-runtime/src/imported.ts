@@ -4,6 +4,7 @@ import { VRMLoaderPlugin, type VRM, type VRMHumanBoneName } from '@pixiv/three-v
 import {
   FINGER_EXTENSION_BONES,
   STANDARD_RIG_BONES,
+  VRM1_FINGER_TO_RIG,
   VRM_FINGER_TO_RIG,
   VRM_HUMANOID_TO_RIG,
   type ExtendedRigBone,
@@ -72,6 +73,85 @@ export const MIXAMO_TO_RIG: Record<string, StandardRigBone> = {
   mixamorigRightToeBase: 'RightToes',
 };
 
+/**
+ * 随平台发布的开源 GLB 使用各自的 Blender/游戏骨骼命名。
+ * 这里逐项显式映射，避免用字符串猜左右侧而再次引入左右手颠倒。
+ */
+export const OPEN_AVATAR_TO_RIG: Record<string, ExtendedRigBone> = {
+  // KayKit Adventurers（手腕是实际手部旋转节点，hand.* 是下游挂点）
+  hips: 'Hips',
+  spine: 'Spine',
+  chest: 'Chest',
+  head: 'Head',
+  'upperarm.l': 'LeftUpperArm',
+  'lowerarm.l': 'LeftLowerArm',
+  'wrist.l': 'LeftHand',
+  'upperarm.r': 'RightUpperArm',
+  'lowerarm.r': 'RightLowerArm',
+  'wrist.r': 'RightHand',
+  'upperleg.l': 'LeftUpperLeg',
+  'lowerleg.l': 'LeftLowerLeg',
+  'foot.l': 'LeftFoot',
+  'toes.l': 'LeftToes',
+  'upperleg.r': 'RightUpperLeg',
+  'lowerleg.r': 'RightLowerLeg',
+  'foot.r': 'RightFoot',
+  'toes.r': 'RightToes',
+
+  // Quaternius Universal Base Characters
+  pelvis: 'Hips',
+  spine_01: 'Spine',
+  spine_02: 'Chest',
+  spine_03: 'UpperChest',
+  neck_01: 'Neck',
+  clavicle_l: 'LeftShoulder',
+  upperarm_l: 'LeftUpperArm',
+  lowerarm_l: 'LeftLowerArm',
+  hand_l: 'LeftHand',
+  clavicle_r: 'RightShoulder',
+  upperarm_r: 'RightUpperArm',
+  lowerarm_r: 'RightLowerArm',
+  hand_r: 'RightHand',
+  thigh_l: 'LeftUpperLeg',
+  calf_l: 'LeftLowerLeg',
+  foot_l: 'LeftFoot',
+  ball_l: 'LeftToes',
+  thigh_r: 'RightUpperLeg',
+  calf_r: 'RightLowerLeg',
+  foot_r: 'RightFoot',
+  ball_r: 'RightToes',
+  thumb_01_l: 'LeftThumbProximal',
+  thumb_02_l: 'LeftThumbIntermediate',
+  thumb_03_l: 'LeftThumbDistal',
+  index_01_l: 'LeftIndexProximal',
+  index_02_l: 'LeftIndexIntermediate',
+  index_03_l: 'LeftIndexDistal',
+  middle_01_l: 'LeftMiddleProximal',
+  middle_02_l: 'LeftMiddleIntermediate',
+  middle_03_l: 'LeftMiddleDistal',
+  ring_01_l: 'LeftRingProximal',
+  ring_02_l: 'LeftRingIntermediate',
+  ring_03_l: 'LeftRingDistal',
+  pinky_01_l: 'LeftLittleProximal',
+  pinky_02_l: 'LeftLittleIntermediate',
+  pinky_03_l: 'LeftLittleDistal',
+  thumb_01_r: 'RightThumbProximal',
+  thumb_02_r: 'RightThumbIntermediate',
+  thumb_03_r: 'RightThumbDistal',
+  index_01_r: 'RightIndexProximal',
+  index_02_r: 'RightIndexIntermediate',
+  index_03_r: 'RightIndexDistal',
+  middle_01_r: 'RightMiddleProximal',
+  middle_02_r: 'RightMiddleIntermediate',
+  middle_03_r: 'RightMiddleDistal',
+  ring_01_r: 'RightRingProximal',
+  ring_02_r: 'RightRingIntermediate',
+  ring_03_r: 'RightRingDistal',
+  pinky_01_r: 'RightLittleProximal',
+  pinky_02_r: 'RightLittleIntermediate',
+  pinky_03_r: 'RightLittleDistal',
+};
+
 /** 候选名称 → StandardRig（含手指扩展骨骼）的反查表（含大小写/冒号变体）。 */
 function buildAliasTable(): Map<string, ExtendedRigBone> {
   const table = new Map<string, ExtendedRigBone>();
@@ -85,6 +165,7 @@ function buildAliasTable(): Map<string, ExtendedRigBone> {
     put(mixamo, bone);
     put(mixamo.replace('mixamorig', 'mixamorig:'), bone);
   }
+  for (const [name, bone] of Object.entries(OPEN_AVATAR_TO_RIG)) put(name, bone);
   // VRM humanoid 小驼峰名（含手指）
   for (const [vrmName, bone] of Object.entries(VRM_HUMANOID_TO_RIG)) put(vrmName, bone);
   for (const [vrmName, bone] of Object.entries(VRM_FINGER_TO_RIG)) put(vrmName, bone);
@@ -276,7 +357,7 @@ export function correctVrm0Facing(root: Object3D, rigMap: Map<ExtendedRigBone, O
 }
 
 /** 按名称在 GLB 场景里匹配骨骼（含手指扩展骨骼）。 */
-function matchGlbBones(root: Object3D): Map<ExtendedRigBone, Object3D> {
+export function matchGlbBones(root: Object3D): Map<ExtendedRigBone, Object3D> {
   const alias = buildAliasTable();
   const rigMap = new Map<ExtendedRigBone, Object3D>();
   const maxBones = STANDARD_RIG_BONES.length + FINGER_EXTENSION_BONES.length;
@@ -361,7 +442,7 @@ export async function loadImportedAvatarFromBuffer(
         if (rawNode) rigMap.set(rigBone, rawNode);
         if (normalizedNode) animationRigMap.set(rigBone, normalizedNode);
       }
-      for (const [vrmName, rigBone] of Object.entries(VRM_FINGER_TO_RIG)) {
+      for (const [vrmName, rigBone] of Object.entries(VRM1_FINGER_TO_RIG)) {
         const node = vrm.humanoid.getRawBoneNode(vrmName as VRMHumanBoneName);
         if (node && !rigMap.has(rigBone)) rigMap.set(rigBone, node);
       }

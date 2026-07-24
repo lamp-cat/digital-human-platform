@@ -83,6 +83,11 @@ export type Traits = z.infer<typeof traitsSchema>;
 export const assetSourceSchema = z.discriminatedUnion('type', [
   z.object({ type: z.literal('built_in') }),
   z.object({
+    type: z.literal('catalog'),
+    assetId: z.string().min(1),
+    compatibility: z.literal('POSE_ONLY'),
+  }),
+  z.object({
     type: z.literal('imported'),
     importId: z.string(),
     compatibility: z.enum(['FULL', 'POSE_ONLY']),

@@ -640,6 +640,10 @@ export function MotionPage({ workspace = 'studio' }: { workspace?: 'studio' | 'v
           importedModelUrl = await fetchAuthedObjectUrl(
             importRecord.modelUrl ?? `/api/v1/imports/${importRecord.id}/model`,
           );
+        } else if (avatar.assetSource.type === 'catalog') {
+          if (!avatar.modelUrl) throw new Error('开源人物模型地址缺失');
+          importCompatibleGarments = [];
+          importedModelUrl = await fetchAuthedObjectUrl(avatar.modelUrl);
         }
 
         const ok = await controller.loadAvatar({
