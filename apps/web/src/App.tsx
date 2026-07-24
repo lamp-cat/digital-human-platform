@@ -48,7 +48,14 @@ export default function App() {
         <Route path="/import" element={<RequireAuth><ImportPage /></RequireAuth>} />
         <Route path="/editor/:id" element={<RequireAuth><EditorPage /></RequireAuth>} />
         <Route path="/avatars" element={<RequireAuth><AvatarsPage /></RequireAuth>} />
-        <Route path="/motion/:id" element={<RequireAuth><MotionPage /></RequireAuth>} />
+        <Route
+          path="/motion/:id"
+          element={<RequireAuth><MotionPage workspace="studio" /></RequireAuth>}
+        />
+        <Route
+          path="/video/:id"
+          element={<RequireAuth><MotionPage workspace="video" /></RequireAuth>}
+        />
         <Route
           path="/admin"
           element={

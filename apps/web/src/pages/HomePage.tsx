@@ -1,85 +1,114 @@
-import { Link, useNavigate } from 'react-router-dom';
+import { Link } from 'react-router-dom';
 import { AppHeader } from '../components/AppHeader';
-import { useAuthStore } from '../stores/authStore';
 
-const FEATURES = [
+const WORKSPACES = [
   {
-    icon: '人',
-    title: '参数捏人',
-    desc: '脸型、体型、肤色全参数化调节，实时预览，随时撤销重做。',
-  },
-  {
+    key: 'style',
+    index: '01',
     icon: '衣',
-    title: '智能换装',
-    desc: '槽位与层级驱动的程序化穿搭，自动处理冲突与防穿透。',
+    title: '人物装扮',
+    subtitle: '创建与编辑数字人',
+    description: '专注完成脸型、体型、肤色、发型与服装搭配，实时查看三维效果。',
+    steps: ['选择人物', '调整外观', '保存造型'],
+    to: '/avatars?workspace=style',
+    action: '进入人物装扮',
   },
   {
-    icon: '模',
-    title: '模型导入',
-    desc: '支持 VRM / GLB，骨架兼容性自动校验并分级开放能力。',
+    key: 'studio',
+    index: '02',
+    icon: '播',
+    title: '虚拟直播间',
+    subtitle: '布景、机位与实时驱动',
+    description: '导入三维房间，自由摆放人物和相机，再通过摄像头进行身体、手部与面部驱动。',
+    steps: ['选择人物', '布置直播间', '开始实时驱动'],
+    to: '/avatars?workspace=studio',
+    action: '进入虚拟直播间',
   },
   {
-    icon: '动',
-    title: '摄像头驱动',
-    desc: '姿态识别完全在浏览器本地运行，视频与关键点不上传。',
+    key: 'video',
+    index: '03',
+    icon: '影',
+    title: '真人视频复现',
+    subtitle: '导入舞蹈并导出数字人视频',
+    description: '在独立工作区导入真人全身视频，本地识别动作并导出数字人 WebM。',
+    steps: ['选择人物', '导入真人视频', '预览并导出'],
+    to: '/avatars?workspace=video',
+    action: '进入视频复现',
   },
-];
+] as const;
 
-/** 首页：产品定位、主 CTA、特性矩阵、公开示例占位。 */
+/** 首页：三个相互独立的一级工作流入口。 */
 export function HomePage() {
-  const navigate = useNavigate();
-  const token = useAuthStore((s) => s.token);
-
-  /** "我的数字人"入口：已登录进列表，未登录去登录页。 */
-  const goMyAvatars = () => navigate(token ? '/avatars' : '/login');
-
   return (
     <div className="page">
       <AppHeader />
-      <main className="page-main">
-        <section className="hero">
-          <p className="hero-eyebrow">自主可控 · 模块化数字人平台</p>
-          <h1>创造属于你的数字人</h1>
+      <main className="page-main home-main">
+        <section className="hero workspace-hero">
+          <p className="hero-eyebrow">数字人创作工作台</p>
+          <h1>今天想完成什么？</h1>
           <p>
-            基于统一 StandardRig 骨架规范的网页三维创作台：手动捏人、程序化换装、
-            外部 VRM/GLB 导入，以及完全在浏览器本地运行的摄像头姿态驱动。
+            三个工作区各自聚焦一项任务。先选择目标，再选择要使用的数字人，
+            页面只展示当前任务需要的工具。
           </p>
           <div className="hero-cta">
             <Link to="/create" className="btn btn-primary btn-lg">
-              开始创作
+              + 创建新数字人
             </Link>
-            <button className="btn btn-secondary btn-lg" onClick={goMyAvatars}>
-              我的数字人
-            </button>
+            <Link to="/avatars" className="btn btn-secondary btn-lg">
+              查看全部人物
+            </Link>
           </div>
         </section>
 
-        <section>
-          <h2 className="section-title">平台能力</h2>
-          <div className="feature-grid">
-            {FEATURES.map((f) => (
-              <div key={f.title} className="feature-card">
-                <div className="feature-icon">{f.icon}</div>
-                <h3>{f.title}</h3>
-                <p>{f.desc}</p>
-              </div>
+        <section aria-labelledby="workspace-title">
+          <div className="section-heading-row">
+            <div>
+              <p className="section-kicker">WORKSPACES</p>
+              <h2 id="workspace-title" className="section-title">
+                选择工作区
+              </h2>
+            </div>
+            <p className="muted">每个工作区都可以随时从顶部导航切换。</p>
+          </div>
+          <div className="workspace-grid">
+            {WORKSPACES.map((workspace) => (
+              <Link
+                key={workspace.key}
+                className={`workspace-card workspace-card-${workspace.key}`}
+                to={workspace.to}
+              >
+                <div className="workspace-card-topline">
+                  <span className="workspace-index">{workspace.index}</span>
+                  <span className="workspace-icon">{workspace.icon}</span>
+                </div>
+                <p className="workspace-subtitle">{workspace.subtitle}</p>
+                <h3>{workspace.title}</h3>
+                <p className="workspace-description">{workspace.description}</p>
+                <ol className="workspace-steps">
+                  {workspace.steps.map((step) => (
+                    <li key={step}>{step}</li>
+                  ))}
+                </ol>
+                <span className="workspace-action">
+                  {workspace.action} <span aria-hidden="true">→</span>
+                </span>
+              </Link>
             ))}
           </div>
         </section>
 
-        <section>
-          <h2 className="section-title">公开示例</h2>
-          <div className="example-grid">
-            {[1, 2, 3].map((i) => (
-              <div key={i} className="example-card placeholder">
-                <div className="example-thumb">?</div>
-                <p>公开示例位（后续版本开放分享）</p>
-              </div>
-            ))}
+        <section className="home-privacy-note">
+          <div className="feature-icon">隐</div>
+          <div>
+            <h3>视觉数据默认留在本机</h3>
+            <p>
+              摄像头、真人视频与人体关键点由浏览器本地 MediaPipe 处理；
+              房间和导出视频也不会自动上传。
+            </p>
           </div>
         </section>
       </main>
-      <footer className="site-footer">© 2026 造浪数字人平台 · 自主可控模块化数字人平台 V1</footer>
+      <footer className="site-footer">© 2026 造浪数字人平台 · 自主可控模块化数字人平台</footer>
     </div>
   );
 }

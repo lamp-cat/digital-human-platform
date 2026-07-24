@@ -63,6 +63,7 @@ type HandPresence = 'none' | 'left' | 'right' | 'both';
 
 type AvatarStance = 'standing' | 'seated' | 'transition';
 type RoomStatus = 'loading' | 'ready' | 'error' | 'none';
+type StudioToolTab = 'scene' | 'motion' | 'detail';
 type DanceState =
   | 'empty'
   | 'loading'
@@ -88,6 +89,12 @@ const DEFAULT_PLACEMENT: AvatarPlacement = {
   rotationYDeg: 0,
   scale: 1,
 };
+
+const CAMERA_AXES = [
+  { label: 'X', index: 0 },
+  { label: 'Y', index: 1 },
+  { label: 'Z', index: 2 },
+] as const;
 
 interface SavedCamera {
   id: string;
@@ -152,11 +159,11 @@ function seekVideo(video: HTMLVideoElement, timeSec: number): Promise<void> {
 }
 
 /**
- * 虚拟直播间：房间/机位/站位编排 + 预置动作 + 摄像头姿态驱动。
+ * 虚拟直播间 / 真人视频复现共享三维运行时，但以独立页面呈现。
  * 链路：CameraPoseTracker → LandmarkSmoother →（校准）/ mapPoseFrameToBoneRotations
  * → TrackingLossManager → applyBoneRotations。全程浏览器本地处理。
  */
-export function MotionPage() {
+export function MotionPage({ workspace = 'studio' }: { workspace?: 'studio' | 'video' }) {
   const { id = '' } = useParams();
   const navigate = useNavigate();
 
@@ -228,6 +235,12 @@ export function MotionPage() {
   const [roomError, setRoomError] = useState('');
   const [activeStudioCamera, setActiveStudioCamera] = useState('front');
   const [savedCameras, setSavedCameras] = useState<SavedCamera[]>([]);
+  const [freeCameraPose, setFreeCameraPose] = useState<StudioCameraPose>({
+    position: [0.45, 1.45, 3.25],
+    target: [0, 1.05, 0],
+    fov: 38,
+  });
+  const [studioToolTab, setStudioToolTab] = useState<StudioToolTab>('scene');
   const [placement, setPlacement] = useState<AvatarPlacement>(DEFAULT_PLACEMENT);
   const [stance, setStance] = useState<AvatarStance>('standing');
   const [danceState, setDanceStateValue] = useState<DanceState>('empty');
@@ -649,12 +662,49 @@ export function MotionPage() {
   }, []);
 
   const switchCamera = useCallback((id: string) => {
-    if (controllerRef.current?.switchStudioCamera(id)) setActiveStudioCamera(id);
+    const controller = controllerRef.current;
+    if (!controller?.switchStudioCamera(id)) return;
+    setActiveStudioCamera(id);
+    const pose = controller.getStudioCameraPresetPose(id);
+    if (pose) setFreeCameraPose(pose);
   }, []);
 
   const switchSavedCamera = useCallback((camera: SavedCamera) => {
     controllerRef.current?.switchStudioCameraPose(camera.pose);
     setActiveStudioCamera(camera.id);
+    setFreeCameraPose(camera.pose);
+  }, []);
+
+  const readCurrentCameraAsFree = useCallback(() => {
+    const controller = controllerRef.current;
+    if (!controller) return;
+    setFreeCameraPose(controller.getStudioCameraPose());
+    setActiveStudioCamera('free');
+  }, []);
+
+  const updateFreeCamera = useCallback(
+    (group: 'position' | 'target', axis: 0 | 1 | 2, value: number) => {
+      if (!Number.isFinite(value)) return;
+      setFreeCameraPose((current) => {
+        const tuple = [...current[group]] as [number, number, number];
+        tuple[axis] = Math.min(12, Math.max(-12, value));
+        const next = { ...current, [group]: tuple };
+        controllerRef.current?.switchStudioCameraPose(next, false);
+        setActiveStudioCamera('free');
+        return next;
+      });
+    },
+    [],
+  );
+
+  const updateFreeCameraFov = useCallback((value: number) => {
+    if (!Number.isFinite(value)) return;
+    setFreeCameraPose((current) => {
+      const next = { ...current, fov: Math.min(70, Math.max(20, value)) };
+      controllerRef.current?.switchStudioCameraPose(next, false);
+      setActiveStudioCamera('free');
+      return next;
+    });
   }, []);
 
   const saveCurrentCamera = useCallback(() => {
@@ -1195,7 +1245,7 @@ export function MotionPage() {
     return (
       <div className="page center-page">
         <p className="form-error">{fatalError}</p>
-        <button className="btn" onClick={() => navigate('/avatars')}>
+        <button className="btn" onClick={() => navigate(`/avatars?workspace=${workspace}`)}>
           返回我的数字人
         </button>
       </div>
@@ -1220,10 +1270,32 @@ export function MotionPage() {
   return (
     <div className="motion-page">
       <header className="editor-topbar">
-        <button className="btn btn-ghost btn-sm" onClick={() => navigate('/avatars')}>
+        <button
+          className="btn btn-ghost btn-sm"
+          onClick={() => navigate(`/avatars?workspace=${workspace}`)}
+        >
           ← 返回
         </button>
-        <span className="motion-title">虚拟直播间 · {avatarName || '加载中…'}</span>
+        <span className="motion-title">
+          {workspace === 'studio' ? '虚拟直播间' : '真人视频复现'} · {avatarName || '加载中…'}
+        </span>
+        <nav className="workspace-topnav" aria-label="数字人工作区">
+          <button
+            className={`btn btn-sm ${workspace === 'studio' ? 'btn-primary' : 'btn-ghost'}`}
+            onClick={() => navigate(`/motion/${id}`)}
+          >
+            直播间
+          </button>
+          <button
+            className={`btn btn-sm ${workspace === 'video' ? 'btn-primary' : 'btn-ghost'}`}
+            onClick={() => navigate(`/video/${id}`)}
+          >
+            视频复现
+          </button>
+          <button className="btn btn-sm btn-ghost" onClick={() => navigate(`/editor/${id}`)}>
+            人物装扮
+          </button>
+        </nav>
       </header>
 
       <div className="motion-body">
@@ -1241,13 +1313,15 @@ export function MotionPage() {
               </div>
               <video
                 ref={videoRef}
-                className={`cam-preview ${cameraActive ? 'active' : ''}`}
+                className={`cam-preview ${workspace === 'studio' && cameraActive ? 'active' : ''}`}
                 muted
                 playsInline
               />
               <video
                 ref={danceVideoRef}
-                className={`dance-video-preview ${danceInfo && !cameraActive ? 'active' : ''}`}
+                className={`dance-video-preview ${
+                  workspace === 'video' && danceInfo ? 'active' : ''
+                }`}
                 muted
                 playsInline
                 preload="metadata"
@@ -1257,12 +1331,12 @@ export function MotionPage() {
                 }}
                 onEnded={() => void finishDanceRun()}
               />
-              {danceInfo && !cameraActive && (
+              {workspace === 'video' && danceInfo && (
                 <div className="dance-source-label">
                   真人源视频 · 不镜像
                 </div>
               )}
-              {driveState === 'calibrating' && calibState && (
+              {workspace === 'studio' && driveState === 'calibrating' && calibState && (
                 <div className="calib-panel">
                   <h3>站姿校准{trackingMode === 'upper' ? '（上半身）' : ''}</h3>
                   <p className="muted">
@@ -1292,10 +1366,10 @@ export function MotionPage() {
                   )}
                 </div>
               )}
-              {trackingLost && (
+              {workspace === 'studio' && trackingLost && (
                 <div className="viewport-banner warning">跟踪已丢失，请回到画面中央</div>
               )}
-              {danceTrackingLost && (
+              {workspace === 'video' && danceTrackingLost && (
                 <div className="viewport-banner warning">
                   此段人体被遮挡，已平滑保持最近可信姿态
                 </div>
@@ -1306,6 +1380,52 @@ export function MotionPage() {
 
         {/* 右侧控制面板 */}
         <aside className="motion-panel">
+          <section className="workspace-guide">
+            <span className="workflow-step-number">步骤 2 / 3</span>
+            <h3>
+              {workspace === 'studio' ? '布置画面并开始驱动' : '导入视频并检查复现效果'}
+            </h3>
+            <p>
+              {workspace === 'studio'
+                ? '按“房间 → 机位 → 人物 → 动作驱动”的顺序设置。各组工具互不混杂。'
+                : '此页面只处理真人视频识别、预览和导出，不显示直播间实时动捕设置。'}
+            </p>
+          </section>
+
+          {workspace === 'studio' && (
+            <>
+              <div className="studio-tool-tabs" role="tablist" aria-label="直播间工具">
+                <button
+                  role="tab"
+                  aria-selected={studioToolTab === 'scene'}
+                  className={studioToolTab === 'scene' ? 'active' : ''}
+                  onClick={() => setStudioToolTab('scene')}
+                >
+                  <span>01</span>
+                  场景与机位
+                </button>
+                <button
+                  role="tab"
+                  aria-selected={studioToolTab === 'motion'}
+                  className={studioToolTab === 'motion' ? 'active' : ''}
+                  onClick={() => setStudioToolTab('motion')}
+                >
+                  <span>02</span>
+                  动作驱动
+                </button>
+                <button
+                  role="tab"
+                  aria-selected={studioToolTab === 'detail'}
+                  className={studioToolTab === 'detail' ? 'active' : ''}
+                  onClick={() => setStudioToolTab('detail')}
+                >
+                  <span>03</span>
+                  面部与手部
+                </button>
+              </div>
+
+              {studioToolTab === 'scene' && (
+                <>
           <section>
             <h3 className="param-group-title">直播房间</h3>
             <p className="muted">
@@ -1358,8 +1478,10 @@ export function MotionPage() {
           <section>
             <h3 className="param-group-title">导播机位</h3>
             <p className="muted">
-              点击机位会平滑切镜；也可以先用鼠标调整自由视角，再保存为自定义机位。
+              快捷机位只作为起点。可在左侧画面拖拽旋转、右键平移、滚轮缩放，
+              也可直接输入相机和注视点坐标。
             </p>
+            <p className="control-label">快捷机位</p>
             <div className="studio-camera-grid">
               {STUDIO_CAMERA_PRESETS.map((camera) => (
                 <button
@@ -1380,19 +1502,82 @@ export function MotionPage() {
                 </button>
               ))}
             </div>
-            <div className="mode-select studio-actions">
+
+            <div className="free-camera-panel">
+              <div className="free-camera-heading">
+                <div>
+                  <strong>自由机位</strong>
+                  <span>坐标范围 -12 ～ 12 米</span>
+                </div>
+                {activeStudioCamera === 'free' && <Badge kind="success">正在使用</Badge>}
+              </div>
+              <div className="camera-coordinate-group">
+                <span>相机位置</span>
+                <div className="camera-coordinate-grid">
+                  {CAMERA_AXES.map(({ label, index }) => (
+                    <label key={`position-${label}`}>
+                      {label}
+                      <input
+                        type="number"
+                        min={-12}
+                        max={12}
+                        step={0.05}
+                        value={Number(freeCameraPose.position[index].toFixed(2))}
+                        onChange={(event) =>
+                          updateFreeCamera('position', index, Number(event.target.value))
+                        }
+                      />
+                    </label>
+                  ))}
+                </div>
+              </div>
+              <div className="camera-coordinate-group">
+                <span>注视目标</span>
+                <div className="camera-coordinate-grid">
+                  {CAMERA_AXES.map(({ label, index }) => (
+                    <label key={`target-${label}`}>
+                      {label}
+                      <input
+                        type="number"
+                        min={-12}
+                        max={12}
+                        step={0.05}
+                        value={Number(freeCameraPose.target[index].toFixed(2))}
+                        onChange={(event) =>
+                          updateFreeCamera('target', index, Number(event.target.value))
+                        }
+                      />
+                    </label>
+                  ))}
+                </div>
+              </div>
+              <label className="camera-fov-field">
+                <span>视野角 FOV</span>
+                <input
+                  type="range"
+                  min={20}
+                  max={70}
+                  step={1}
+                  value={freeCameraPose.fov}
+                  onChange={(event) => updateFreeCameraFov(Number(event.target.value))}
+                />
+                <output>{freeCameraPose.fov.toFixed(0)}°</output>
+              </label>
+            </div>
+
+            <div className="mode-select studio-actions camera-actions">
+              <button className="btn btn-sm btn-primary" onClick={readCurrentCameraAsFree}>
+                读取左侧当前视角
+              </button>
               <button className="btn btn-sm" onClick={saveCurrentCamera}>
-                保存当前视角
+                保存为机位
+              </button>
+              <button className="btn btn-sm btn-ghost" onClick={() => switchCamera('front')}>
+                恢复正面
               </button>
               {savedCameras.length > 0 && (
-                <button
-                  className="btn btn-sm btn-ghost"
-                  onClick={() => {
-                    setSavedCameras([]);
-                    switchCamera('front');
-                  }}
-                >
-                  清空自定义
+                <button className="btn btn-sm btn-ghost" onClick={() => setSavedCameras([])}>
+                  清空已保存
                 </button>
               )}
             </div>
@@ -1478,7 +1663,10 @@ export function MotionPage() {
               format={(value) => `${value.toFixed(2)}×`}
             />
           </section>
+                </>
+              )}
 
+              {studioToolTab === 'motion' && (
           <section>
             <h3 className="param-group-title">预置动作</h3>
             <div className="preset-btns">
@@ -1509,7 +1697,11 @@ export function MotionPage() {
             </p>
             {runtimeBusy && <p className="muted">骨架驱动中，预置动作已暂停。</p>}
           </section>
+              )}
+            </>
+          )}
 
+          {workspace === 'video' && (
           <section>
             <h3 className="param-group-title">
               真人舞蹈复现 <Badge kind="info">本地 AI</Badge>
@@ -1655,14 +1847,18 @@ export function MotionPage() {
               )}
             </div>
             <p className="muted">
-              导出内容是当前直播房间、当前人物站位与机位的最终画面；录制过程中仍可切换导播
-              机位。浏览器支持时保留原视频声音，否则输出无声 WebM。
+              导出内容是左侧当前画面；可在开始前用鼠标旋转、平移或缩放调整构图。
+              浏览器支持时保留原视频声音，否则输出无声 WebM。
             </p>
             <p className="muted">
               建议使用固定机位、均匀光照、头手脚完整入镜且遮挡较少的正面或 45° 舞蹈视频。
             </p>
           </section>
+          )}
 
+          {workspace === 'studio' && (
+            <>
+              {studioToolTab === 'motion' && (
           <section>
             <h3 className="param-group-title">摄像头姿态驱动</h3>
             {driveState === 'idle' && (
@@ -1770,7 +1966,10 @@ export function MotionPage() {
             )}
             {errorMsg && driveState !== 'denied' && <p className="form-error">{errorMsg}</p>}
           </section>
+              )}
 
+              {studioToolTab === 'detail' && (
+                <>
           <section>
             <h3 className="param-group-title">面部表情追踪</h3>
             <p className="muted">
@@ -1862,6 +2061,10 @@ export function MotionPage() {
               </p>
             )}
           </section>
+                </>
+              )}
+            </>
+          )}
         </aside>
       </div>
     </div>

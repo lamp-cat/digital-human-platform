@@ -227,9 +227,17 @@ export class AvatarSceneController {
 
   /** 平滑切换到内置机位；机位坐标随人物站位平移。 */
   switchStudioCamera(id: string, animate = true): boolean {
+    const pose = this.getStudioCameraPresetPose(id);
+    if (!pose) return false;
+    this.switchStudioCameraPose(pose, animate);
+    return true;
+  }
+
+  /** 读取内置机位的绝对坐标，供自由机位面板作为可编辑起点。 */
+  getStudioCameraPresetPose(id: string): StudioCameraPose | null {
     const preset = STUDIO_CAMERA_PRESETS.find((item) => item.id === id);
-    if (!preset) return false;
-    const pose: StudioCameraPose = {
+    if (!preset) return null;
+    return {
       position: [
         this.placement.x + preset.offset[0],
         this.placement.y + preset.offset[1],
@@ -242,8 +250,6 @@ export class AvatarSceneController {
       ],
       fov: preset.fov,
     };
-    this.switchStudioCameraPose(pose, animate);
-    return true;
   }
 
   /** 切换到用户保存的自定义机位。 */

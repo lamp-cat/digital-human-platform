@@ -1,10 +1,41 @@
 import { useCallback, useEffect, useState } from 'react';
-import { Link, useNavigate } from 'react-router-dom';
+import { Link, useNavigate, useSearchParams } from 'react-router-dom';
 import { AppHeader } from '../components/AppHeader';
 import { EmptyState } from '../components/controls';
 import { api, ApiError, fetchAuthedObjectUrl } from '../api/client';
 import type { AvatarSummary } from '../api/types';
 import { useUiStore } from '../stores/uiStore';
+
+type WorkspaceKind = 'style' | 'studio' | 'video';
+
+const WORKSPACE_CONFIG: Record<
+  WorkspaceKind,
+  {
+    title: string;
+    subtitle: string;
+    action: string;
+    path: (id: string) => string;
+  }
+> = {
+  style: {
+    title: '选择要装扮的人物',
+    subtitle: '选择后进入人物装扮工作区，只显示外观与服装编辑工具。',
+    action: '开始装扮',
+    path: (id) => `/editor/${id}`,
+  },
+  studio: {
+    title: '选择直播人物',
+    subtitle: '选择后进入虚拟直播间，进行布景、自由机位和实时动作驱动。',
+    action: '进入直播间',
+    path: (id) => `/motion/${id}`,
+  },
+  video: {
+    title: '选择视频复现人物',
+    subtitle: '选择后进入独立视频工作区，导入真人舞蹈并导出数字人视频。',
+    action: '进入视频复现',
+    path: (id) => `/video/${id}`,
+  },
+};
 
 /** 封面图（带鉴权 blob 加载）。 */
 function Cover({ url, alt }: { url: string | null; alt: string }) {
@@ -47,7 +78,16 @@ export function AvatarsPage() {
   const [avatars, setAvatars] = useState<AvatarSummary[] | null>(null);
   const [error, setError] = useState('');
   const navigate = useNavigate();
+  const [searchParams] = useSearchParams();
   const toast = useUiStore((s) => s.toast);
+  const requestedWorkspace = searchParams.get('workspace');
+  const workspace: WorkspaceKind | null =
+    requestedWorkspace === 'style' ||
+    requestedWorkspace === 'studio' ||
+    requestedWorkspace === 'video'
+      ? requestedWorkspace
+      : null;
+  const workspaceConfig = workspace ? WORKSPACE_CONFIG[workspace] : null;
 
   const load = useCallback(async () => {
     try {
@@ -98,13 +138,29 @@ export function AvatarsPage() {
       <main className="page-main">
         <div className="page-head-row">
           <div>
-            <h1 className="page-title">我的数字人</h1>
-            <p className="page-subtitle">管理你创建的所有数字人，随时继续编辑或驱动。</p>
+            {workspaceConfig && (
+              <Link className="workspace-back-link" to="/">
+                ← 返回工作区首页
+              </Link>
+            )}
+            <h1 className="page-title">{workspaceConfig?.title ?? '我的数字人'}</h1>
+            <p className="page-subtitle">
+              {workspaceConfig?.subtitle ?? '管理你创建的所有数字人，随时继续编辑或驱动。'}
+            </p>
           </div>
           <button className="btn btn-primary" onClick={createNew}>
             + 新建数字人
           </button>
         </div>
+        {workspaceConfig && (
+          <div className="workflow-step-banner">
+            <span className="workflow-step-number">步骤 1 / 3</span>
+            <div>
+              <strong>先选择一个数字人</strong>
+              <p>后续页面会自动带入这个人物，不需要重复选择。</p>
+            </div>
+          </div>
+        )}
         {error && <p className="form-error">{error}</p>}
         {!avatars && !error && <SkeletonGrid />}
         {avatars && avatars.length === 0 && (
@@ -121,18 +177,29 @@ export function AvatarsPage() {
                 <div className="avatar-card-cover-wrap">
                   <Cover url={a.coverUrl} alt={a.name} />
                   <div className="avatar-card-overlay">
-                    <Link className="btn btn-sm btn-primary" to={`/editor/${a.id}`}>
-                      编辑
-                    </Link>
-                    <Link className="btn btn-sm" to={`/motion/${a.id}`}>
-                      直播间
-                    </Link>
-                    <button className="btn btn-sm" onClick={() => void duplicate(a.id)}>
-                      复制
-                    </button>
-                    <button className="btn btn-sm btn-danger" onClick={() => void remove(a.id, a.name)}>
-                      删除
-                    </button>
+                    {workspaceConfig ? (
+                      <Link className="btn btn-primary workspace-enter-btn" to={workspaceConfig.path(a.id)}>
+                        {workspaceConfig.action} →
+                      </Link>
+                    ) : (
+                      <>
+                        <Link className="btn btn-sm btn-primary" to={`/editor/${a.id}`}>
+                          装扮
+                        </Link>
+                        <Link className="btn btn-sm" to={`/motion/${a.id}`}>
+                          直播
+                        </Link>
+                        <Link className="btn btn-sm" to={`/video/${a.id}`}>
+                          视频
+                        </Link>
+                        <button className="btn btn-sm" onClick={() => void duplicate(a.id)}>
+                          复制
+                        </button>
+                        <button className="btn btn-sm btn-danger" onClick={() => void remove(a.id, a.name)}>
+                          删除
+                        </button>
+                      </>
+                    )}
                   </div>
                 </div>
                 <div className="avatar-card-body">
